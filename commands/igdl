@@ -1,0 +1,164 @@
+// commands/igdl.js
+const axios = require('axios');
+const config = require('../config');
+const { getMasterApiKey } = require('../utils/apiKeyManager');
+const { sendAnimatedMessage } = require('../utils/animator'); // Impor animator
+const {
+    prepareWAMessageMedia,
+    generateWAMessageFromContent,
+    delay
+} = require('@whiskeysockets/baileys');
+
+module.exports = {
+    Callname: 'igdl',
+    Kategori: 'Downloader',
+    SubKategori: 'Instagram',
+    Deskripsi: 'Mengunduh gambar atau video dari Instagram.',
+    Usage: 'igdl <url_instagram>',
+    ReqEnergy: 5,
+
+    async execute(sock, msg, options) {
+        const { args, jid } = options;
+        const prefix = config.botPrefix;
+
+        if (args.length === 0) {
+            return sock.sendMessage(jid, { text: `Penggunaan: ${prefix}${this.Callname} <url_instagram>` }, { quoted: msg });
+        }
+
+        const url = args[0];
+        if (!url.includes('instagram.com')) {
+            return sock.sendMessage(jid, { text: '⚠️ URL tidak valid. Hanya menerima URL dari Instagram.' }, { quoted: msg });
+        }
+
+        const apiKey = await getMasterApiKey();
+        if (!apiKey) {
+            return sock.sendMessage(jid, { text: `Fitur ini memerlukan konfigurasi API Key oleh admin.` }, { quoted: msg });
+        }
+
+        const waitFrames = [
+            "⏳ Memproses permintaan Anda...",
+            "🔄 Mengambil data dari Instagram...",
+            "🔗 Menyiapkan link download...",
+            "📥 Segera dikirim!"
+        ];
+        let processingMsg = await sendAnimatedMessage(sock, jid, waitFrames, { text: waitFrames[0] }, msg);
+        if (!processingMsg) { // Gagal mengirim pesan awal animasi
+             processingMsg = await sock.sendMessage(jid, { text: config.waitMessage || "⏳ Memproses..." }, { quoted: msg });
+        }
+
+
+        try {
+            const apiUrl = `https://szyrineapi.biz.id/download/instagram?url=${encodeURIComponent(url)}`;
+            const response = await axios.get(apiUrl, {
+                headers: { 'X-API-Key': apiKey },
+                timeout: 30000
+            });
+
+            const data = response.data;
+
+            // Hapus pesan progres setelah API merespons
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key });
+            }
+
+            if (!data || !data.status) {
+                const errMsg = data && data.message ? data.message : "Gagal mengambil data dari API.";
+                return sock.sendMessage(jid, { text: `🚫 Error: ${errMsg}` }, { quoted: msg });
+            }
+
+            let captionText = `📸 *Author:* ${data.author || 'Tidak diketahui'}\n`;
+            if (data.caption) {
+                captionText += `📝 *Caption:* ${data.caption}\n`;
+            }
+            captionText += `\n🔗 *Sumber:* [Instagram](${url})\n\n${config.watermark || ''}`;
+
+            if (data.download_links && data.download_links.length > 0) {
+                if (data.download_links.length === 1) {
+                    const media = data.download_links[0];
+                    if (media.type === 'video') {
+                        await sock.sendMessage(jid, {
+                            video: { url: media.url },
+                            caption: captionText,
+                            mimetype: 'video/mp4'
+                        }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 5 });
+                    } else if (media.type === 'image') {
+                        await sock.sendMessage(jid, {
+                            image: { url: media.url },
+                            caption: captionText
+                        }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 2 });
+                    } else {
+                        await sock.sendMessage(jid, { text: `Media tidak didukung: ${media.type}. Link: ${media.url}` }, { quoted: msg });
+                    }
+                } else { // Carousel untuk multiple media
+                    let cards = [];
+                    let videosToSendSeparately = [];
+
+                    for (let i = 0; i < data.download_links.length; i++) {
+                        const mediaItem = data.download_links[i];
+                        if (mediaItem.type === 'image') {
+                            try {
+                                const mediaMessage = await prepareWAMessageMedia({ image: { url: mediaItem.url } }, { upload: sock.waUploadToServer, timeout: 20000 });
+                                cards.push({
+                                    header: { imageMessage: mediaMessage.imageMessage, hasMediaAttachment: true },
+                                    body: { text: `Gambar #${i + 1}` },
+                                    nativeFlowMessage: { buttons: [{ name: "cta_url", buttonParamsJson: JSON.stringify({ display_text: "Lihat Sumber", url: url }) }] }
+                                });
+                            } catch (prepError) {
+                                console.warn(`[${this.Callname}] Gagal mempersiapkan gambar ${mediaItem.url} untuk carousel:`, prepError);
+                            }
+                        } else if (mediaItem.type === 'video') {
+                            videosToSendSeparately.push({ url: mediaItem.url, index: i + 1 });
+                        }
+                    }
+
+                    if (cards.length > 0) {
+                        const msgContent = generateWAMessageFromContent(jid, {
+                            interactiveMessage: {
+                                body: { text: captionText },
+                                header: { title: `Hasil Unduhan Instagram (${cards.length} Gambar)`, subtitle: data.author || "Instagram Post", hasMediaAttachment: false },
+                                carouselMessage: { cards: cards, messageVersion: 1 },
+                            },
+                        }, { quoted: msg });
+                        await sock.relayMessage(jid, msgContent.message, { messageId: msgContent.key.id });
+                    }
+
+                    if (videosToSendSeparately.length > 0) {
+                        if (cards.length > 0) await sock.sendMessage(jid, {text: "Mengirim video secara terpisah..."}, {quoted:msg});
+                        for (const video of videosToSendSeparately) {
+                            try {
+                                await sock.sendMessage(jid, {
+                                    video: { url: video.url },
+                                    caption: `${captionText}\n\nVideo #${video.index}`,
+                                    mimetype: 'video/mp4'
+                                }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 5 });
+                                await delay(1500);
+                            } catch (vidErr) {
+                                console.error(`[${this.Callname}] Gagal mengirim video ${video.url}:`, vidErr);
+                                await sock.sendMessage(jid, {text: `Gagal mengirim video #${video.index}`}, {quoted:msg});
+                            }
+                        }
+                    }
+
+                    if (cards.length === 0 && videosToSendSeparately.length === 0) {
+                        await sock.sendMessage(jid, { text: "Tidak ada media yang berhasil diproses." }, { quoted: msg });
+                    }
+                }
+            } else {
+                await sock.sendMessage(jid, { text: "Tidak ada link download yang ditemukan." }, { quoted: msg });
+            }
+
+        } catch (error) {
+            if (processingMsg && processingMsg.key) { // Hapus pesan progres jika ada error
+                await sock.sendMessage(jid, { delete: processingMsg.key }).catch(delErr => console.warn("Gagal hapus pesan progres igdl:", delErr));
+            }
+            console.error(`[${this.Callname}] Error:`, error.message);
+            let userErrorMessage = `Waduh, ada error pas jalanin command ${this.Callname}.`;
+            if (error.response && error.response.data && (error.response.data.message || error.response.data.msg)) {
+                userErrorMessage = `Error dari API: ${error.response.data.message || error.response.data.msg}`;
+            } else if (error.code === 'ECONNABORTED') {
+                userErrorMessage = `Server API kelamaan jawab nih, coba lagi nanti.`;
+            }
+            await sock.sendMessage(jid, { text: userErrorMessage }, { quoted: msg });
+        }
+    }
+};

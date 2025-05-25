@@ -1,117 +1,153 @@
+// commands/pinc.js
 const axios = require('axios');
+const config = require('../config');
+const { getMasterApiKey } = require('../utils/apiKeyManager');
+const { sendAnimatedMessage } = require('../utils/animator'); // Impor animator
 const {
     prepareWAMessageMedia,
     generateWAMessageFromContent
 } = require('@whiskeysockets/baileys');
 
 module.exports = {
-    NamaFitur: 'Pencarian Gambar Pinterest V2',
     Callname: 'pinc',
     Kategori: 'Pencarian',
     SubKategori: 'Gambar',
-    ReqEnergy: 1,
-    ReqTier: 'Super Kere',
-    ReqCoin: 'n',
-    CostCoin: 0,
-    Deskripsi: 'Mencari gambar dari Pinterest (Versi 2) berdasarkan query yang diberikan dan menampilkan dalam format carousel.',
+    Deskripsi: 'Mencari gambar dari Pinterest berdasarkan query.',
+    Usage: 'pinc <query> [--geser <jumlah>]',
+    ReqEnergy: 2,
 
-    execute: async function (sock, msg, commands, { isActive, tier, multiplier, mediaType, apiKey }) {
-        const jid = msg.key.remoteJid;
-        const rawQuery = msg.message?.conversation?.split(" ").slice(1).join(" ") || '';
+    async execute(sock, msg, options) {
+        const { args, jid, text: fullArgsText } = options;
+        const prefix = config.botPrefix;
 
-        if (!rawQuery.trim()) {
-            await sock.sendMessage(jid, { text: "⚠️ Masukkan kata kunci untuk mencari gambar di Pinterest!" }, { quoted: msg });
-            return;
+        if (args.length === 0 && !fullArgsText.includes(this.Callname)) { // Perbaikan untuk cek argumen kosong
+             return sock.sendMessage(jid, { text: `Penggunaan: ${prefix}${this.Callname} <query> [--geser <jumlah>]` }, { quoted: msg });
         }
 
-        const [query, geser] = rawQuery.split('--geser').map(part => part.trim());
-        let amount = parseInt(geser?.split(" ")?.[1] || 5);
-        amount = Math.max(1, Math.min(amount, 5));
 
-        console.log(`[${this.Callname}] Mencari gambar (v2): ${query}`);
+        const apiKey = await getMasterApiKey();
+        if (!apiKey) {
+            return sock.sendMessage(jid, { text: `Fitur ini memerlukan konfigurasi API Key oleh admin.` }, { quoted: msg });
+        }
 
-        await sock.sendPresenceUpdate('composing', jid);
+        let query = args[0];
+        let amount = 5;
+        let useCarousel = false;
+
+        const queryParts = fullArgsText.replace(prefix + this.Callname, "").trim().split("--geser");
+        query = queryParts[0].trim();
+
+        if (queryParts.length > 1 && queryParts[1].trim() !== "") {
+            useCarousel = true;
+            const amountStr = queryParts[1].trim();
+            if (amountStr && !isNaN(parseInt(amountStr))) {
+                amount = parseInt(amountStr);
+            }
+            amount = Math.max(1, Math.min(amount || 5, 10));
+        } else if (queryParts.length > 1 && queryParts[1].trim() === "") { // Jika ada --geser tapi tidak ada angka
+            useCarousel = true; // Default amount (5) akan digunakan
+        }
+
+
+        if (!query) {
+             return sock.sendMessage(jid, { text: `Masukkan query pencarian!\nContoh: ${prefix}${this.Callname} kucing lucu` }, { quoted: msg });
+        }
+
+        const waitFrames = [
+            `🔎 Mencari "${query}" di Pinterest...`,
+            `🔄 Mengumpulkan hasil terbaik...`,
+            `🖼️ Menyiapkan gambar untukmu...`,
+            `✨ Hampir selesai!`
+        ];
+        let processingMsg = await sendAnimatedMessage(sock, jid, waitFrames, { text: waitFrames[0] }, msg);
+         if (!processingMsg) {
+             processingMsg = await sock.sendMessage(jid, { text: config.waitMessage || "⏳ Mencari..." }, { quoted: msg });
+        }
 
         try {
-            const apiUrl = `https://sannpanel.my.id/pinterest-search-v2?query=${encodeURIComponent(query)}&limit=${amount}`; // Gunakan endpoint baru dan limit
-            const { data } = await axios.get(apiUrl, {
-                timeout: 10000,
-                headers: { 'x-api-key': 'ramadhan7' }
+            const apiUrl = `https://szyrineapi.biz.id/download/pinterest-search-v2?query=${encodeURIComponent(query)}&limit=${amount}`;
+            const response = await axios.get(apiUrl, {
+                headers: { 'X-API-Key': apiKey },
+                timeout: 20000
             });
-
-            if (!data || !data.status || !Array.isArray(data.result) || data.result.length === 0) { // Periksa struktur respons
-                await sock.sendMessage(jid, { text: "🚫 Gambar tidak ditemukan." }, { quoted: msg });
-                return;
+            
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key });
             }
 
-            const images = data.result.map(item => ({ // Gunakan data.result
-                url: item.url, //Sesuaikan properti url
-                title: item.title || "Gambar Pinterest", //sesuaikan properti title
-                link: "https://whatsapp.com/channel/0029VafhW708aKvCHyexCe3y"
-            }));
+            const data = response.data;
 
-            if (typeof geser === "string") {
+            if (!data || !data.status || !data.result || !Array.isArray(data.result.pins) || data.result.pins.length === 0) {
+                return sock.sendMessage(jid, { text: "🚫 Gambar tidak ditemukan atau format respons API tidak sesuai." }, { quoted: msg });
+            }
+
+            const pins = data.result.pins;
+
+            if (useCarousel) {
                 let cards = [];
-                for (let [index, image] of images.entries()) {
-                    try {
-                        const media = await prepareWAMessageMedia({ image: { url: image.url } }, { upload: sock.waUploadToServer });
-                        cards.push({
-                            header: { imageMessage: media.imageMessage, hasMediaAttachment: true },
-                            body: { text: `#${index + 1} - ${image.title}` },
-                            nativeFlowMessage: {
-                                buttons: [
-                                    {
-                                        name: "cta_url",
-                                        buttonParamsJson: JSON.stringify({
-                                            display_text: "Lihat di WhatsApp Channel",
-                                            url: image.link
-                                        }),
-                                    },
-                                ],
-                            },
-                        });
-                    } catch (err) {
-                        console.warn(`❗ Gagal memuat gambar: ${image.url}`, err);
+                for (let i = 0; i < pins.length; i++) {
+                    const pin = pins[i];
+                    if (pin.media && pin.media.images && pin.media.images.orig && pin.media.images.orig.url) {
+                        try {
+                            const media = await prepareWAMessageMedia({ image: { url: pin.media.images.orig.url } }, { upload: sock.waUploadToServer, timeout: 20000 });
+                            cards.push({
+                                header: { imageMessage: media.imageMessage, hasMediaAttachment: true },
+                                body: { text: `#${i + 1} - ${pin.title || "Gambar Pinterest"}` },
+                                nativeFlowMessage: {
+                                    buttons: [
+                                        {
+                                            name: "cta_url",
+                                            buttonParamsJson: JSON.stringify({
+                                                display_text: "Lihat di Pinterest",
+                                                url: pin.pin_url || `https://pinterest.com/pin/${pin.id}`
+                                            }),
+                                        },
+                                    ],
+                                },
+                            });
+                        } catch (err) {
+                            console.warn(`[${this.Callname}] Gagal memuat gambar untuk carousel: ${pin.media.images.orig.url}`, err);
+                        }
                     }
                 }
 
                 if (cards.length === 0) {
-                    await sock.sendMessage(jid, { text: "⚠️ Semua gambar gagal dimuat." }, { quoted: msg });
-                    return;
+                    return sock.sendMessage(jid, { text: "⚠️ Semua gambar gagal dimuat untuk carousel." }, { quoted: msg });
                 }
 
                 const msgContent = generateWAMessageFromContent(jid, {
                     interactiveMessage: {
-                        body: { text: `📸 Hasil pencarian untuk: "${query.trim()}"` },
-                        carouselMessage: {
-                            cards: cards,
-                            messageVersion: 1,
-                        },
+                        body: { text: `📸 Hasil pencarian untuk: "${query.trim()}" (${cards.length} gambar)` },
+                        header: { title: `Pinterest: ${query.trim()}`, subtitle: `${config.botName}`, hasMediaAttachment: false },
+                        carouselMessage: { cards: cards, messageVersion: 1 },
                     },
-                }, {});
-
+                }, { quoted: msg });
                 await sock.relayMessage(jid, msgContent.message, { messageId: msgContent.key.id });
 
             } else {
-                let randomImage = images[Math.floor(Math.random() * images.length)];
-                await sock.sendMessage(jid, {
-                    image: { url: randomImage.url },
-                    caption: `🔍 *${randomImage.title}*\n\n[Jangan lupa follow  WhatsApp Channel Gw](${randomImage.link})`
-                }, { quoted: msg });
+                const randomPin = pins[Math.floor(Math.random() * pins.length)];
+                if (randomPin.media && randomPin.media.images && randomPin.media.images.orig && randomPin.media.images.orig.url) {
+                    await sock.sendMessage(jid, {
+                        image: { url: randomPin.media.images.orig.url },
+                        caption: `🔍 *${randomPin.title || "Gambar Pinterest"}*\n\n🔗 [Lihat di Pinterest](${randomPin.pin_url || `https://pinterest.com/pin/${randomPin.id}`})\n\n${config.watermark || ''}`
+                    }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 2 });
+                } else {
+                    await sock.sendMessage(jid, { text: "Gagal mendapatkan URL gambar dari pin acak." }, { quoted: msg });
+                }
             }
 
         } catch (error) {
-            console.error(`[${this.Callname}] Error:`, error.message || error);
-            let errorMessage = "⚠️ Terjadi kesalahan saat mengambil data.";
-
-           if (error.response) {
-                errorMessage = `⚠️ Error dari server: ${error.response.status} - ${error.response.data.error || error.response.statusText}`;
-            } else if (error.code === 'ECONNABORTED') {
-                errorMessage = "⚠️ Waktu tunggu permintaan ke API habis.";
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key }).catch(delErr => console.warn("Gagal hapus pesan progres pinc:", delErr));
             }
-            await sock.sendMessage(jid, { text: errorMessage }, { quoted: msg });
-        } finally {
-            await sock.sendPresenceUpdate('paused', jid);
+            console.error(`[${this.Callname}] Error:`, error.message);
+            let userErrorMessage = `Waduh, ada error pas jalanin command ${this.Callname}.`;
+            if (error.response && error.response.data && (error.response.data.message || error.response.data.error) ) {
+                userErrorMessage = `Error dari API: ${error.response.data.message || error.response.data.error}`;
+            } else if (error.code === 'ECONNABORTED') {
+                userErrorMessage = `Server API kelamaan jawab nih, coba lagi nanti.`;
+            }
+            await sock.sendMessage(jid, { text: userErrorMessage }, { quoted: msg });
         }
-    },
+    }
 };

@@ -1,129 +1,140 @@
 // commands/tiktok.js
 const axios = require('axios');
+const config = require('../config');
+const { getMasterApiKey } = require('../utils/apiKeyManager');
+const { sendAnimatedMessage } = require('../utils/animator'); // Impor animator
+const { delay } = require('@whiskeysockets/baileys');
 
 module.exports = {
-    NamaFitur: 'TikTok Downloader',
     Callname: 'ttdl',
-    Kategori: 'Media',
-    SubKategori: 'Download',
+    Kategori: 'Downloader',
+    SubKategori: 'TikTok',
+    Deskripsi: 'Mengunduh video atau foto dari TikTok tanpa watermark.',
+    Usage: 'ttdl <url_tiktok>',
     ReqEnergy: 5,
-    ReqTier: null,
-    ReqCoin: 'n',
-    CostCoin: 0,
-    Deskripsi: 'Mengunduh video atau foto dari TikTok.',
-    execute: async function (sock, msg, commands, { isActive, tier, multiplier, mediaType, apiKey }) {
-        const jid = msg.key.remoteJid;
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-        const args = text.split(' ');
-        const url = args[1];
 
-        console.log(`[${this.Callname}] Premium Data: { isActive: ${isActive}, tier: ${tier}, multiplier: ${multiplier} }`);
+    async execute(sock, msg, options) {
+        const { args, jid } = options;
+        const prefix = config.botPrefix;
 
-        if (!url) {
-            return await sock.sendMessage(jid, { text: '❌ Silakan masukkan URL video TikTok.' });
+        if (args.length === 0) {
+            return sock.sendMessage(jid, { text: `Penggunaan: ${prefix}${this.Callname} <url_tiktok>` }, { quoted: msg });
         }
 
+        const url = args[0];
         if (!url.includes('tiktok.com')) {
-            return await sock.sendMessage(jid, { text: '⚠️ URL tidak valid. Hanya menerima URL dari TikTok.' });
+            return sock.sendMessage(jid, { text: '⚠️ URL tidak valid. Hanya menerima URL dari TikTok.' }, { quoted: msg });
         }
 
-        // Kirim pesan awal (⏳ Memproses...)
-        let processingMessage = await sock.sendMessage(jid, { text: '⏳ Memproses permintaan Anda...' });
+        const apiKey = await getMasterApiKey();
+        if (!apiKey) {
+            return sock.sendMessage(jid, { text: `Fitur ini memerlukan konfigurasi API Key oleh admin.` }, { quoted: msg });
+        }
 
-        // Update animasi pesan progres
-          const updateProgress = async (text) => {
-              const animationFrames = ['(づ｡◕‿‿◕｡)づ', '(づ￣ ³￣)づ', '(づ｡◕‿‿◕｡)づ'];
-              let currentFrame = 0;
-              let textArray = text.split('');
-
-              for (let i = 0; i < textArray.length; i++) {
-                  const frame = animationFrames[currentFrame];
-                  const newText = textArray.slice(0, i + 1).join('');
-                  const fullText = `${frame} ${newText}`;
-
-                  processingMessage = await sock.sendMessage(jid, {
-                      edit: processingMessage.key,
-                      text: fullText,
-                  });
-
-                  currentFrame = (currentFrame + 1) % animationFrames.length;
-                  await new Promise((resolve) => setTimeout(resolve, 75)); // Delay 75ms
-              }
-              return processingMessage;
-          };
+        const waitFrames = [
+            "⏳ Memproses permintaan TikTok Anda...",
+            "🔄 Menghubungi server TikTok...",
+            "🔗 Mencari link tanpa watermark...",
+            "📥 Siap-siap download!"
+        ];
+        let processingMsg = await sendAnimatedMessage(sock, jid, waitFrames, { text: waitFrames[0] }, msg);
+        if (!processingMsg) {
+             processingMsg = await sock.sendMessage(jid, { text: config.waitMessage || "⏳ Memproses..." }, { quoted: msg });
+        }
 
         try {
-            processingMessage = await updateProgress('🔄 Mengambil data dari TikTok...');
-
-            const apiUrl = `https://sannpanel.my.id/tiktok?url=${encodeURIComponent(url)}`;
+            const apiUrl = `https://szyrineapi.biz.id/download/tiktok?url=${encodeURIComponent(url)}`;
             const response = await axios.get(apiUrl, {
-                headers: { 'x-api-key': 'ramadhan7' } // Tambahkan header API Key
+                headers: { 'X-API-Key': apiKey },
+                timeout: 45000
             });
-            const data = response.data;
 
-            if (!data.status) {
-                return await updateProgress('❌ Gagal mengambil data TikTok.');
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key });
             }
 
-            processingMessage = await updateProgress('📥 Mengunduh media...');
+            const data = response.data;
 
-            const captionText = `🎵 *Judul:* ${data.title}\n👤 *Author:* ${data.author.nickname} (@${data.author.fullname})\n📅 *Tanggal:* ${data.taken_at}\n📍 *Region:* ${data.region}\n\n👀 *Views:* ${data.stats.views}\n❤️ *Likes:* ${data.stats.likes}\n💬 *Comments:* ${data.stats.comment}\n🔄 *Shares:* ${data.stats.share}\n📥 *Downloads:* ${data.stats.download}`;
+            if (!data || !data.status || !data.result) {
+                const errMsg = data && data.message ? data.message : "Gagal mengambil data dari API TikTok.";
+                return sock.sendMessage(jid, { text: `🚫 Error: ${errMsg}` }, { quoted: msg });
+            }
 
-            // Kirim caption
-            await sock.sendMessage(jid, { text: captionText });
+            const result = data.result;
+            let captionText = `🎵 *Judul:* ${result.title || 'Tidak ada judul'}\n`;
+            if (result.author && result.author.nickname) {
+                captionText += `👤 *Author:* ${result.author.nickname} (@${result.author.fullname || result.author.id})\n`;
+            }
+            if (result.taken_at) {
+                captionText += `📅 *Tanggal:* ${result.taken_at}\n`;
+            }
+            if (result.stats) {
+                captionText += `\n👀 Views: ${result.stats.views || 0} | ❤️ Likes: ${result.stats.likes || 0} | 💬 Comments: ${result.stats.comment || 0}`;
+            }
+            captionText += `\n\n${result.watermark || `API by Sann`} - ${config.watermark || ''}`;
 
-            // Cek apakah post berisi video atau foto
+
             let mediaSent = false;
-            if (data.data.length > 0) {
-                for (let media of data.data) {
-                    if (media.type === 'nowatermark_hd' || media.type === 'nowatermark') {
-                        // Kirim video
-                        await sock.sendMessage(jid, {
-                            video: { url: media.url },
-                            caption: captionText,
-                            mimetype: 'video/mp4',
-                            contextInfo: {
-                                externalAdReply: {
-                                    title: data.title,
-                                    body: `Video oleh @${data.author.nickname}`,
-                                    showAdAttribution: true,
-                                    mediaType: 2,
-                                    thumbnailUrl: data.cover,
-                                    mediaUrl: url,
-                                },
-                            },
-                        });
-                        mediaSent = true;
-                        break;
-                    }
-                }
+            if (result.data && result.data.length > 0) {
+                const videoHd = result.data.find(m => m.type === 'nowatermark_hd');
+                const videoNoWm = result.data.find(m => m.type === 'nowatermark');
+                const videoToDownload = videoHd || videoNoWm;
 
-                if (!mediaSent) {
-                    // Kirim foto jika hanya terdapat foto
-                    for (let media of data.data) {
-                        if (media.type === 'photo') {
-                            await sock.sendMessage(jid, { image: { url: media.url }, caption: captionText });
-                            mediaSent = true;
+                if (videoToDownload) {
+                    await sock.sendMessage(jid, {
+                        video: { url: videoToDownload.url },
+                        caption: captionText,
+                        mimetype: 'video/mp4',
+                        contextInfo: result.cover ? {
+                            externalAdReply: {
+                                title: result.title || "TikTok Video",
+                                body: `Video oleh @${result.author?.nickname || 'Unknown'}`,
+                                thumbnailUrl: result.cover,
+                                mediaType: 2,
+                                mediaUrl: url,
+                                sourceUrl: url,
+                                showAdAttribution: true
+                            }
+                        } : undefined
+                    }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 5 });
+                    mediaSent = true;
+                } else {
+                    const photos = result.data.filter(m => m.type === 'photo');
+                    if (photos.length > 0) {
+                        await sock.sendMessage(jid, { text: `${captionText}\n\n🖼️ Mengirim ${photos.length} foto...` }, { quoted: msg });
+                        for (let i = 0; i < photos.length; i++) {
+                            try {
+                                await sock.sendMessage(jid, {
+                                    image: { url: photos[i].url },
+                                    caption: i === 0 ? `Foto ${i + 1}/${photos.length}\n\n${captionText}` : `Foto ${i + 1}/${photos.length}`
+                                }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 2 });
+                                await delay(1000);
+                            } catch (imgErr) {
+                                console.error(`[${this.Callname}] Gagal mengirim foto ${photos[i].url}:`, imgErr);
+                                await sock.sendMessage(jid, { text: `Gagal mengirim foto #${i+1}`}, {quoted: msg});
+                            }
                         }
+                        mediaSent = true;
                     }
                 }
             }
 
             if (!mediaSent) {
-                await updateProgress('❌ Tidak ditemukan media yang bisa diunduh.');
+                await sock.sendMessage(jid, { text: "Tidak ditemukan media video atau foto yang bisa diunduh dari link tersebut." }, { quoted: msg });
             }
 
-            // Hapus pesan progres setelah selesai
-            await sock.sendMessage(jid, { delete: processingMessage.key });
-
         } catch (error) {
-            console.error(`[${this.Callname}] Error : ${error}`);
-            await sock.sendMessage(jid, { text: '❌ Terjadi kesalahan saat memproses permintaan ini.' });
-             if (processingMessage && processingMessage.key) {
-                await sock.sendMessage(jid, { delete: processingMessage.key });
-             }
-        } finally {
-            await sock.sendPresenceUpdate('paused', jid);
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key }).catch(delErr => console.warn("Gagal hapus pesan progres ttdl:", delErr));
+            }
+            console.error(`[${this.Callname}] Error:`, error.message);
+            let userErrorMessage = `Waduh, ada error pas jalanin command ${this.Callname}.`;
+            if (error.response && error.response.data && (error.response.data.message || error.response.data.error)) {
+                userErrorMessage = `Error dari API: ${error.response.data.message || error.response.data.error}`;
+            } else if (error.code === 'ECONNABORTED') {
+                userErrorMessage = `Server API kelamaan jawab nih, coba lagi nanti.`;
+            }
+            await sock.sendMessage(jid, { text: userErrorMessage }, { quoted: msg });
         }
     }
 };

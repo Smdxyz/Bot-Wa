@@ -2,137 +2,174 @@
 const config = require('../config');
 const { getUser, createUser, updateUser, addExp } = require('../userDatabase');
 const { getActivePremium } = require('../premiumManager');
-// const fs = require('fs/promises'); // fs/promises tidak digunakan lagi setelah RineAI dihapus, kecuali ada keperluan lain
-// const path = require('path'); // path tidak digunakan lagi setelah RineAI dihapus, kecuali ada keperluan lain
+const { executeCommand } = require('../commandManager');
+const { checkAndGrantAchievements } = require('../achievementManager');
+const { regenerateUserCoins } = require('../coinRegenManager');
+const { regenerateUserEnergy } = require('../energyRegenManager');
 
 const handleMessageUpsert = async (sock, commands, m) => {
     try {
         const msg = m.messages[0];
-        if (!msg.message) return;
-        if (msg.key && msg.key.remoteJid === 'status@broadcast') return;
-        if (msg.key.fromMe) return;
-        if (msg.key.remoteJid.endsWith('@newsletter')) return;
-
-        const jid = msg.key.remoteJid;
-        const senderJid = msg.key.participant || jid;
-        let user = await getUser(senderJid);
-
-        if (!user) {
-            const waUsername = await sock.getWaUsername(msg, senderJid);
-            await createUser(senderJid, waUsername);
-            user = await getUser(senderJid); // Ambil data user yang baru dibuat
-            console.log(`User baru dibuat: ${senderJid} dengan username: ${waUsername}`);
-        } else {
-            const waUsername = await sock.getWaUsername(msg, senderJid);
-            if (waUsername && user.username !== waUsername) {
-                await updateUser(senderJid, { username: waUsername });
-                user = await getUser(senderJid); // Ambil data user yang baru diupdate
-                console.log(`Username user ${senderJid} diperbarui menjadi: ${waUsername}`);
-            }
-        }
-
-        // Pastikan 'user' tidak null sebelum mencoba mengakses propertinya
-        if (!user) {
-            console.warn(`[messages.upsert] User ${senderJid} tidak ditemukan setelah proses create/update. Skipping.`);
+        if (!msg.message ||
+            (msg.key && msg.key.remoteJid === 'status@broadcast') ||
+            (msg.key.fromMe && !config.processOwnMessages) ||
+            (msg.key.remoteJid && msg.key.remoteJid.endsWith('@newsletter'))
+           ) {
             return;
         }
 
-        const { isActive, tier, multiplier } = getActivePremium(user);
+        const jid = msg.key.remoteJid;
+        const senderJid = msg.key.participant || msg.key.remoteJid; // participant untuk grup, remoteJid untuk PC
+        const senderId = senderJid.split('@')[0];
 
-        // Ambil pesan
+        // Logika untuk mode 'self'
+        if (config.botMode === 'self') {
+            const ownerNumbers = config.adminNumber.split(',').map(num => num.trim());
+            if (!ownerNumbers.includes(senderId)) {
+                // console.log(`[MessageHandler] Mode 'self': Pesan dari ${senderId} (${senderJid}) diabaikan.`);
+                return; // Abaikan pesan jika bukan dari owner
+            }
+        }
+
+        let user = await getUser(senderJid);
+        if (!user) {
+            const waUsername = await sock.getWaUsername(msg, senderJid);
+            user = await createUser(senderJid, waUsername);
+            if (!user) {
+                console.error(`[MessageHandler] Gagal membuat user untuk ${senderJid}.`);
+                return;
+            }
+            if (config.enableAdReply && config.adReplyConfig && Object.keys(config.adReplyConfig).length > 0) {
+                let welcomeText = `👋 Wih, ada anak baru nih, *${user.username}*!\nSelamat datang di *${config.botName}*.\nKetik *${config.botPrefix}menu* buat liat ada apa aja disini!`;
+                let welcomeOptions = {
+                    text: welcomeText,
+                    contextInfo: { externalAdReply: config.adReplyConfig }
+                };
+                // Kirim ke PC user baru, bukan ke grup jika pesan dari grup
+                await sock.sendMessage(senderJid.endsWith('@g.us') ? senderJid : jid, welcomeOptions);
+            }
+        } else {
+            const currentWaUsername = await sock.getWaUsername(msg, senderJid);
+            if (user.username !== currentWaUsername && currentWaUsername && !currentWaUsername.includes('@s.whatsapp.net')) {
+                await updateUser(senderJid, { username: currentWaUsername });
+                user.username = currentWaUsername;
+            }
+        }
+
+        if (user.isBanned) {
+            // Kirim pesan bahwa user dibanned jika mereka mencoba command
+            // Untuk pesan biasa, biarkan saja (tidak ada respons)
+            // Pesan ban akan dikirim oleh commandManager jika user mencoba command
+            return;
+        }
+
+        if (config.coinRegenSettings.enabled) await regenerateUserCoins(senderJid);
+        if (config.energyRegenSettings && config.energyRegenSettings.enabled) await regenerateUserEnergy(senderJid);
+        
+        const refreshedUser = await getUser(senderJid);
+        if (!refreshedUser) { 
+            console.error(`[MessageHandler] User ${senderJid} hilang setelah regenerasi.`); 
+            return; 
+        }
+        user = refreshedUser;
+
+        const now = new Date();
+        let userUpdates = {
+            messagesSent: (user.messagesSent || 0) + 1,
+            lastMessageTime: now.toISOString()
+        };
+        const currentHour = now.getHours();
+        if (currentHour >= 0 && currentHour < 4) {
+            userUpdates.commandsUsedCountInNightTime = (user.commandsUsedCountInNightTime || 0) + 1;
+        }
+        await updateUser(senderJid, userUpdates);
+        user = { ...user, ...userUpdates };
+
         const type = Object.keys(msg.message)[0];
         let text = '';
+        let userArgs = [];
+        if (type === 'conversation') text = msg.message.conversation;
+        else if (type === 'extendedTextMessage') text = msg.message.extendedTextMessage.text;
+        else if (type === 'imageMessage' && msg.message.imageMessage.caption) text = msg.message.imageMessage.caption;
+        else if (type === 'videoMessage' && msg.message.videoMessage.caption) text = msg.message.videoMessage.caption;
+        else if (type === 'buttonsResponseMessage') text = msg.message.buttonsResponseMessage.selectedButtonId;
+        else if (type === 'listResponseMessage') text = msg.message.listResponseMessage.singleSelectReply?.selectedRowId || '';
+        
+        text = text ? text.trim() : "";
+        const fullTextArgument = text.split(/ +/).slice(1).join(" ");
 
-        if (type === 'conversation') {
-            text = msg.message.conversation;
-        } else if (type === 'extendedTextMessage') {
-            text = msg.message.extendedTextMessage.text;
-        } else if (type === 'imageMessage' && msg.message.imageMessage.caption) {
-            text = msg.message.imageMessage.caption;
-            console.log(`[messages.upsert] Pesan adalah caption gambar: ${text}`);
-        } else if (type === 'videoMessage' && msg.message.videoMessage.caption) {
-            text = msg.message.videoMessage.caption;
-            console.log(`[messages.upsert] Pesan adalah caption video: ${text}`);
-        }
-
-        console.log(`[messages.upsert] Pesan diterima: ${text || '*Pesan media tanpa teks*'}, Tipe: ${type}, Dari: ${senderJid}`);
-
-        // Cek apakah pesan dari tombol
-        let commandName = null;
-        if (text) { // Hanya proses parsing JSON jika text ada
-            try {
-                const parsedData = JSON.parse(text);
-                if (parsedData && parsedData.command) { // Tambah pengecekan parsedData
-                    commandName = parsedData.command.toLowerCase();
-                    console.log(`[messages.upsert] Pesan dari tombol, command: ${commandName}`);
-                }
-            } catch (error) {
-                // Bukan pesan tombol atau JSON tidak valid, biarkan saja
-            }
-        }
-
-
-        // Proses Command
-        if (commandName || (text && text.startsWith(config.botPrefix))) {
-            if (!commandName) {
-                commandName = text.slice(config.botPrefix.length).split(' ')[0].toLowerCase();
-            }
+        if (text.startsWith(config.botPrefix)) {
+            const commandParts = text.slice(config.botPrefix.length).trim().split(/ +/);
+            const commandName = commandParts.shift().toLowerCase();
+            userArgs = commandParts;
             const command = commands.get(commandName);
 
             if (command) {
-                console.log(`[messages.upsert] Command ditemukan: ${commandName}`);
-                try {
-                    if (typeof command.execute === 'function') {
-                        console.log(`[messages.upsert] Memanggil command.execute untuk: ${commandName}`);
-                        await command.execute(sock, msg, commands, { isActive, tier, multiplier, mediaType: type });
-                        console.log(`[messages.upsert] command.execute berhasil dieksekusi: ${commandName}`);
-                    } else {
-                        console.warn(`[messages.upsert] command.execute bukan fungsi untuk: ${commandName}`);
-                        await sock.sendMessage(jid, { text: `Terjadi kesalahan: command.execute bukan fungsi untuk ${commandName}` });
-                    }
-                } catch (error) {
-                    console.error(`[messages.upsert] Error handling command '${commandName}':`, error);
-                    await sock.sendMessage(jid, { text: `Terjadi kesalahan saat memproses perintah ${commandName}: ${error.message || error}` });
+                // Cek ban di commandManager saja, agar pesan ban hanya muncul saat mencoba command
+                // const isAdminBot = config.adminNumber.split(',').map(n => n.trim()).includes(senderId); // senderId sudah di-split
+                const isAdminBot = config.adminNumber.split(',').map(n => n.trim()).includes(senderId);
+
+
+                if (command.AdminOnly && !isAdminBot) {
+                    await sock.sendMessage(jid, { text: config.adminOnlyMessage }, { quoted: msg }); return;
                 }
-            } else {
-                console.log(`[messages.upsert] Command tidak ditemukan: ${commandName}`);
-                await sock.sendMessage(jid, { text: `Command "${commandName}" tidak ditemukan. Ketik ${config.botPrefix}menu untuk melihat daftar command.` });
+                if (command.OwnerOnly && !config.adminNumber.split(',').map(n => n.trim())[0] === senderId) { // Hanya owner pertama di config
+                    await sock.sendMessage(jid, { text: config.ownerOnlyMessage }, { quoted: msg }); return;
+                }
+                if (command.GroupOnly && !jid.endsWith('@g.us')) {
+                    await sock.sendMessage(jid, { text: config.groupOnlyMessage }, { quoted: msg }); return;
+                }
+                if (command.PCOnly && jid.endsWith('@g.us')) {
+                    await sock.sendMessage(jid, { text: config.pcOnlyMessage }, { quoted: msg }); return;
+                }
+
+                const cmdExecutionResult = await executeCommand(sock, msg, command, senderJid, userArgs);
+                if (cmdExecutionResult.success) {
+                    try {
+                        const premiumInfo = getActivePremium(cmdExecutionResult.user || user);
+                        const groupMetadata = jid.endsWith('@g.us') ? await sock.groupMetadata(jid).catch(() => null) : null;
+                        const senderIsGroupAdmin = groupMetadata ? groupMetadata.participants.find(p => p.id === senderJid)?.admin?.endsWith('admin') || false : false;
+
+                        await command.execute(sock, msg, {
+                            args: userArgs, text: fullTextArgument, commandName, jid, senderJid,
+                            user: cmdExecutionResult.user || user,
+                            commands, isGroup: jid.endsWith('@g.us'),
+                            isAdminGroup: senderIsGroupAdmin, isAdminBot: isAdminBot, premiumInfo, mediaType: type,
+                        });
+                    } catch (execError) {
+                        console.error(`[MessageHandler] Error eksekusi '${commandName}' oleh ${senderJid}:`, execError);
+                        await sock.sendMessage(jid, { text: config.errorMessage });
+                    }
+                } else {
+                    let replyMsg = cmdExecutionResult.message;
+                    if (replyMsg.includes("Energi tidak mencukupi")) replyMsg = config.notEnoughEnergyMessage;
+                    else if (replyMsg.includes("Coin tidak mencukupi")) replyMsg = config.notEnoughCoinMessage;
+                    else if (replyMsg.includes("membutuhkan tier premium")) replyMsg = config.premiumOnlyMessage;
+                    else if (replyMsg.includes("telah diblokir")) replyMsg = config.userBannedMessage.replace("Alasan: Tidak ada alasan", `Alasan: ${cmdExecutionResult.user?.banReason || 'Tidak ada alasan'}`);
+
+                    await sock.sendMessage(jid, { text: replyMsg }, { quoted: msg });
+                }
             }
-        } else {
-            // Ini adalah blok untuk pesan biasa (bukan command)
-            // Tidak ada lagi logic RineAI di sini.
-            // Bisa ditambahkan logic lain jika perlu, misal auto-reply atau logging khusus.
-            if (text && text.trim().length > 0) { // Hanya log jika ada teks
-                 console.log(`[messages.upsert] Pesan biasa diterima (bukan command): "${text}" dari ${senderJid}`);
-            }
-            // Jika mau ada balasan otomatis atau apa, bisa ditaruh di sini.
-            // Contoh:
-            // if (text === 'halo') {
-            //     await sock.sendMessage(jid, { text: 'Halo juga!' });
-            // }
         }
 
-        // Tambahkan EXP setiap pesan diterima (jika user valid)
-        if (user && senderJid) { // Pastikan senderJid juga ada
-            const expGain = 0.000010; // Sesuaikan jika perlu
-            const leveledUp = await addExp(senderJid, expGain);
-            if (leveledUp) {
-                const updatedUser = await getUser(senderJid); // Ambil data user terbaru setelah naik level
-                if (updatedUser) { // Pastikan user masih ada
-                    const levelUpMessage = `🎉 Selamat @${senderJid.split('@')[0]}! Anda naik level menjadi *Level ${updatedUser.level}*!\nAnda mendapatkan 🪙50 coin dan ⚡25 energy!`;
-                    await sock.sendMessage(senderJid, { // Kirim ke senderJid (personal)
-                        text: levelUpMessage,
-                        mentions: [senderJid]
-                    });
+        if (user && senderJid) {
+            const expGain = config.expPerMessage || 0.2;
+            if (expGain > 0 && text.length > 3) { // Hanya beri EXP jika pesan lebih dari 3 karakter
+                const expResult = await addExp(senderJid, expGain);
+                if (expResult.leveledUp) {
+                    const updatedUserAfterLevelUp = await getUser(senderJid);
+                    if (updatedUserAfterLevelUp) {
+                        const levelUpMessage = `🎉 Asiiik, @${senderJid.split('@')[0]}! Loe naik ke *Level ${updatedUserAfterLevelUp.level}*! Hadiah meluncurrr...`;
+                        await sock.sendMessage(jid, { text: levelUpMessage, mentions: [senderJid] });
+                    }
                 }
             }
         }
+        await checkAndGrantAchievements(sock, senderJid, { currentTime: new Date() });
 
     } catch (error) {
-        console.error("Error in messages.upsert:", error);
-        // Pertimbangkan untuk tidak mengirim pesan error ke user di sini, karena bisa jadi error sistemik.
-        // Cukup log saja, atau kirim notifikasi ke admin.
+        console.error("[MessageHandler] Error fatal di messages.upsert:", error);
     }
 };
 
-module.exports = { handleMessageUpsert };module.exports = { handleMessageUpsert };
+module.exports = { handleMessageUpsert };

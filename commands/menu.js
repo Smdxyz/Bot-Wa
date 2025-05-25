@@ -1,173 +1,166 @@
-const { formatTime, formatMenu } = require('../utils/formatUtils');
-const { getBotStats } = require('../adminManager');
-const { readDatabase } = require('../utils/utils');
-const { getUser } = require('../userDatabase');
+// commands/menu.js
 const config = require('../config');
-const { delay, generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
-const fs = require('fs');
-const path = require('path');
-const moment = require('moment-timezone');
-
-// Ambil daftar admin dari config
-const adminNumbers = config.adminNumber.split(',').map(number => number.trim().split('@')[0]);
+const { formatSuperMenuTextFrames } = require('../utils/formatUtils');
+const fs = require('fs'); // Menggunakan fs sinkronus untuk readFileSync
+const { delay } = require('@whiskeysockets/baileys');
 
 module.exports = {
-    NamaFitur: 'Menu',
-    Callname: 'menu',
-    Kategori: 'Info',
-    SubKategori: 'Bot',
+    Callname: "menu",
+    Kategori: "Informasi",
+    SubKategori: "Utama",
+    Deskripsi: "Menampilkan Super Menu bot dengan animasi edit pesan.",
+    Usage: "menu",
     ReqEnergy: 0,
-    ReqTier: null,
-    ReqCoin: 'n',
-    CostCoin: 0,
-    Deskripsi: 'Menampilkan menu dan informasi bot dengan tampilan yang lebih menarik.',
-    execute: async function (sock, msg) {
-        const jid = msg.key.remoteJid;
-        const userId = msg.key.participant || msg.key.remoteJid;
-        const userNumber = userId.split('@')[0];
 
-        console.log(`[menu.js] START - userId: ${userId}`);
-
-        if (config.botMode === 'private' && !adminNumbers.includes(userNumber)) {
-            await sock.sendMessage(jid, { text: "Maaf, bot ini dalam mode pribadi. Hanya admin yang dapat menggunakan." });
-            console.log(`[menu.js] User not admin.`);
-            return;
-        }
-
-        let user = await getUser(userId);
-        if (!user) {
-            await sock.sendMessage(jid, { text: "Pengguna tidak ditemukan. Silakan gunakan bot terlebih dahulu." });
-            console.log(`[menu.js] User not found.`);
-            return;
-        }
-
-        const now = moment().tz('Asia/Jakarta');
-        const hour = now.hour();
-        let greeting, emoji;
-
-        if (hour >= 5 && hour < 11) {
-            greeting = config.greetingMorning;
-            emoji = "";
-        } else if (hour >= 11 && hour < 15) {
-            greeting = config.greetingAfternoon;
-            emoji = "";
-        } else if (hour >= 15 && hour < 18) {
-            greeting = config.greetingEvening;
-            emoji = "";
-        } else if (hour >= 18 && hour < 22) {
-            greeting = config.greetingNight;
-            emoji = "";
-        } else {
-            greeting = config.greetingMidnight;
-            emoji = "";
-        }
-
-        const tagUser = `@${userNumber}`;
-        const newsletterJid = '120363285859178588@newsletter'; // Ganti dengan JID saluran WhatsApp Anda
-        const newsletterName = 'Sann X '; // Nama saluran yang akan muncul biru
-
-        const loadingEmojis = ["", "", "", ""];
-        let loadingIndex = 0;
-        let loadingMessage;
+    async execute(sock, msg, options) {
+        const { jid, senderJid, user, commands, isAdminBot } = options;
+        const botName = config.botName || "MyBot";
+        const ownerNumbers = config.adminNumber.split(',');
 
         try {
-            // Kirim pesan loading
-            loadingMessage = await sock.sendMessage(jid, {
-                text: `Memuat menu... ${loadingEmojis[loadingIndex]} \n\n${greeting} ${tagUser}! ${emoji}`,
-                mentions: [`${userNumber}@s.whatsapp.net`]
+            const menuFrames = await formatSuperMenuTextFrames(botName, user, commands, {
+                totalFrames: config.menuAnimationFrames,
+                isAdminBot: isAdminBot
             });
 
-            let loadingInterval = setInterval(async () => {
+            if (!menuFrames || menuFrames.length === 0) {
+                throw new Error("Gagal membuat frame menu, bosku.");
+            }
+
+            const mentions = [senderJid];
+            if (ownerNumbers.length > 0 && ownerNumbers[0].trim()) {
+                mentions.push(`${ownerNumbers[0].trim()}@s.whatsapp.net`);
+            }
+
+            let initialMessageOptions = {};
+            let messageKeyForEdit = null;
+
+            // Menentukan konten pesan awal (gambar+caption atau teks)
+            if (config.botLogoPath && fs.existsSync(config.botLogoPath) && (config.useAnimatedMenu || (!config.useAnimatedMenu && config.sendMenuWithImage))) {
                 try {
-                    loadingIndex = (loadingIndex + 1) % loadingEmojis.length;
-                    await sock.sendMessage(jid, {
-                        edit: loadingMessage.key,
-                        text: `Memuat menu... ${loadingEmojis[loadingIndex]} \n\n${greeting} ${tagUser}! ${emoji}`,
-                        mentions: [`${userNumber}@s.whatsapp.net`]
-                    });
-                } catch (error) {
-                    console.error("Error dalam animasi loading:", error);
-                    clearInterval(loadingInterval);
+                    initialMessageOptions.image = fs.readFileSync(config.botLogoPath);
+                    initialMessageOptions.caption = menuFrames[0];
+                } catch (readError) {
+                    console.warn(`[MenuCommand] Gagal membaca file logo di ${config.botLogoPath}: ${readError.message}. Menggunakan teks saja.`);
+                    initialMessageOptions.text = menuFrames[0];
                 }
-            }, 800);
+            } else {
+                if (config.botLogoPath && !(config.useAnimatedMenu || (!config.useAnimatedMenu && config.sendMenuWithImage))) {
+                    // Kondisi ini berarti path ada tapi tidak digunakan karena konfigurasi
+                } else if (config.botLogoPath) { // Path ada tapi fs.existsSync(config.botLogoPath) false
+                    console.warn(`[MenuCommand] File logo di ${config.botLogoPath} tidak ditemukan atau tidak dapat diakses. Menggunakan teks saja.`);
+                }
+                initialMessageOptions.text = menuFrames[0];
+            }
 
-            await delay(2500); // Waktu delay sebelum menu tampil
-            clearInterval(loadingInterval);
-        } catch (error) {
-            console.error("Error saat mengirim pesan loading:", error);
-        }
+            // Membangun contextInfo
+            let contextInfoPayload = {};
+            if (mentions.length > 0) {
+                contextInfoPayload.mentionedJid = mentions;
+            }
 
-        const startTime = process.hrtime();
-        const botStats = await getBotStats();
-        const endTime = process.hrtime(startTime);
+            if (config.enableAdReply && config.adReplyConfig) {
+                 contextInfoPayload.externalAdReply = {
+                    title: config.adReplyConfig.title,
+                    body: config.adReplyConfig.body,
+                    mediaUrl: config.adReplyConfig.mediaUrl || undefined,
+                    sourceUrl: config.adReplyConfig.sourceUrl,
+                    mediaType: config.adReplyConfig.mediaType,
+                    renderLargerThumbnail: config.adReplyConfig.renderLargerThumbnail,
+                    showAdAttribution: true,
+                 };
+                 if (config.adReplyConfig.localThumbnailPath && fs.existsSync(config.adReplyConfig.localThumbnailPath)) {
+                    try {
+                        contextInfoPayload.externalAdReply.thumbnail = fs.readFileSync(config.adReplyConfig.localThumbnailPath);
+                    } catch (readThumbError) {
+                        console.warn(`[MenuCommand] Gagal membaca file thumbnail AdReply di ${config.adReplyConfig.localThumbnailPath}: ${readThumbError.message}. Fallback ke URL jika ada.`);
+                        if (config.adReplyConfig.thumbnailUrl) {
+                            contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
+                        }
+                    }
+                 } else if (config.adReplyConfig.localThumbnailPath) {
+                    console.warn(`[MenuCommand] File thumbnail AdReply di ${config.adReplyConfig.localThumbnailPath} tidak ditemukan. Fallback ke URL jika ada.`);
+                    if (config.adReplyConfig.thumbnailUrl) {
+                        contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
+                    }
+                 } else if (config.adReplyConfig.thumbnailUrl) { // Jika local path tidak ada, langsung pakai URL
+                    contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
+                 }
+            }
 
-        const db = await readDatabase();
-        console.log(`[menu.js] Database read successfully.`);
-
-        const popularCommands = Object.entries(db.users).reduce((acc, [userId, userData]) => {
-            if (userData.commandsUsed && typeof userData.commandsUsed === 'object') {
-                for (const commandName in userData.commandsUsed) {
-                    const count = userData.commandsUsed[commandName];
-                    const existingCommand = acc.find(cmd => cmd.name === commandName);
-                    if (existingCommand) {
-                        existingCommand.count += count;
-                    } else {
-                        acc.push({ name: commandName, count });
+            if (config.newsletterJidForMenu && config.newsletterNameForMenu) {
+                contextInfoPayload.forwardedNewsletterMessageInfo = {
+                    newsletterName: config.newsletterNameForMenu,
+                    newsletterJid: config.newsletterJidForMenu,
+                };
+                if (contextInfoPayload.externalAdReply) {
+                    contextInfoPayload.externalAdReply.title = config.newsletterNameForMenu; // Override title AdReply dengan nama newsletter
+                } else {
+                    contextInfoPayload.externalAdReply = {
+                        title: config.newsletterNameForMenu,
+                        body: config.botName,
+                        mediaType: 1,
+                        showAdAttribution: true,
+                    };
+                    if (config.adReplyConfig && config.adReplyConfig.localThumbnailPath && fs.existsSync(config.adReplyConfig.localThumbnailPath)) {
+                        try {
+                            contextInfoPayload.externalAdReply.thumbnail = fs.readFileSync(config.adReplyConfig.localThumbnailPath);
+                        } catch (readThumbError) {
+                             console.warn(`[MenuCommand] Gagal membaca file thumbnail AdReply (newsletter) di ${config.adReplyConfig.localThumbnailPath}: ${readThumbError.message}. Fallback ke URL jika ada.`);
+                             if (config.adReplyConfig.thumbnailUrl) {
+                                contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
+                            }
+                        }
+                    } else if (config.adReplyConfig?.localThumbnailPath) {
+                         console.warn(`[MenuCommand] File thumbnail AdReply (newsletter) di ${config.adReplyConfig.localThumbnailPath} tidak ditemukan. Fallback ke URL jika ada.`);
+                         if (config.adReplyConfig.thumbnailUrl) {
+                            contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
+                        }
+                    } else if (config.adReplyConfig?.thumbnailUrl) {
+                        contextInfoPayload.externalAdReply.thumbnailUrl = config.adReplyConfig.thumbnailUrl;
                     }
                 }
-            }
-            return acc;
-        }, []);
-
-        popularCommands.sort((a, b) => b.count - a.count);
-
-        const watermark = config.watermark;
-        const botName = config.botName;
-        const prefix = config.botPrefix; // Prefix dari config.js
-        const menuText = await formatMenu(botName, botStats, popularCommands, watermark, user, prefix);
-
-        const imagePath = config.menuImage || path.join(__dirname, '..', 'assets', 'menu_image.jpg');
-        const menuMessage = generateWAMessageFromContent(jid, proto.Message.fromObject({
-            extendedTextMessage: {
-                text: menuText,
-                footer: watermark,
-                contextInfo: {
-                    mentionedJid: [`${userNumber}@s.whatsapp.net`],
-                    forwardingScore: 99, //  Wajib untuk label "Diteruskan"
-                    isForwarded: true,   //  Wajib untuk trigger tulisan biru
-                    forwardedNewsletterMessageInfo: {
-                        newsletterName: newsletterName,  //  Nama saluran (biru otomatis)
-                        newsletterJid: newsletterJid    //  JID saluran @newsletter
-                    },
-                    externalAdReply: {
-                        title: `${botName} Menu`,
-                        body: "Szyrine Bots Api",
-                        thumbnail: fs.readFileSync(imagePath),
-                        sourceUrl: `https://wa.me/${newsletterJid}`,  // Fallback jika teks biru gagal
-                        mediaUrl: `https://wa.me/${newsletterJid}`,
-                        renderLargerThumbnail: true,
-                        showAdAttribution: true,
-                        mediaType: 1,
-                    },
-                },
-            },
-        }), {});
-
-        try {
-            // Tampilkan menu utama
-            await sock.relayMessage(jid, menuMessage.message, { messageId: menuMessage.key.id });
-
-            // Hapus pesan loading setelah menu ditampilkan
-            if (loadingMessage) {
-                await sock.sendMessage(jid, { delete: loadingMessage.key });
-                console.log(`[menu.js] Pesan loading dihapus.`);
+                contextInfoPayload.forwardingScore = 5; // Nilai umum untuk tampilan "Forwarded many times"
+                contextInfoPayload.isForwarded = true;
             }
 
-            console.log(`[menu.js] Menu berhasil dikirim dan loading dihapus.`);
+            if (Object.keys(contextInfoPayload).length > 0) {
+                initialMessageOptions.contextInfo = contextInfoPayload;
+            }
+
+            const sentMsg = await sock.sendMessage(jid, initialMessageOptions, { quoted: msg });
+
+            if (sentMsg && sentMsg.key && sentMsg.key.id) {
+                messageKeyForEdit = sentMsg.key;
+            } else {
+                console.warn("[MenuCommand] Gagal mendapatkan key dari pesan pertama, animasi edit mungkin gagal.");
+                if (!config.useAnimatedMenu) console.log(`[MenuCommand] Menu (non-animasi) dikirim ke ${jid}`);
+                return;
+            }
+
+            if (config.useAnimatedMenu && messageKeyForEdit && menuFrames.length > 1) {
+                const editDelay = config.menuAnimationDelay || 700;
+                for (let i = 1; i < menuFrames.length; i++) {
+                    await delay(editDelay);
+                    try {
+                        let editOptions = { text: menuFrames[i], edit: messageKeyForEdit };
+                        if (contextInfoPayload.mentionedJid) {
+                            editOptions.contextInfo = { mentionedJid: contextInfoPayload.mentionedJid };
+                        }
+                        await sock.sendMessage(jid, editOptions);
+                    } catch (editError) {
+                        console.warn(`[MenuCommand] Gagal mengedit menu ke frame ${i}:`, editError.message);
+                        break;
+                    }
+                }
+                console.log(`[MenuCommand] Super Menu animasi selesai dikirim ke ${jid}`);
+            } else if (!config.useAnimatedMenu) {
+                 console.log(`[MenuCommand] Menu (non-animasi) dikirim ke ${jid}`);
+            }
+
         } catch (error) {
-            console.error("Error saat mengirim atau menghapus pesan menu:", error);
+            console.error(`[MenuCommand] Gagal total saat mengirim menu:`, error);
+            await sock.sendMessage(jid, { text: config.errorMessage }, { quoted: msg });
         }
-
-        console.log(`[menu.js] END`);
-    },
+    }
 };

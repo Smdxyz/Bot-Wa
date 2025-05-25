@@ -4,42 +4,84 @@ const path = require('path');
 
 const dataPath = path.join(__dirname, '..', 'database.json');
 
+// Struktur statistik bot default
+function getDefaultBotStats() {
+    return {
+        totalUsers: 0,
+        totalCommandsUsed: 0,
+        startTime: new Date().toISOString(), // Kapan bot terakhir kali dimulai
+        // Tambahkan statistik lain jika perlu
+    };
+}
+
+// Struktur database default
+function getDefaultDatabaseStructure() {
+    return {
+        users: {}, // { jid: userData }
+        bot: getDefaultBotStats(),
+        // Tambahkan struktur lain jika perlu, misal 'groups', 'settings'
+    };
+}
+
+
 // Fungsi pembantu untuk membaca database
 async function readDatabase() {
     try {
-        // Check if the database file exists
-        await fs.access(dataPath);
+        await fs.access(dataPath); // Cek apakah file ada
         const data = await fs.readFile(dataPath, 'utf8');
+        if (!data) { // File kosong
+            console.warn("[readDatabase] Database file is empty. Initializing with default structure.");
+            const defaultDb = getDefaultDatabaseStructure();
+            await writeDatabase(defaultDb);
+            return defaultDb;
+        }
         const parsedData = JSON.parse(data);
 
-        // Validasi struktur database dasar
+        // Validasi dan migrasi struktur dasar jika perlu
         if (typeof parsedData !== 'object' || parsedData === null) {
-            console.error("[readDatabase] Struktur database tidak valid. Mengembalikan objek default.");
-            console.error("[readDatabase] Data:", parsedData); // Tambahkan log ini
-            return getDefaultDatabaseStructure();
+            console.error("[readDatabase] Invalid database structure (not an object). Re-initializing.");
+            return getDefaultDatabaseStructure(); // Kembalikan default jika korup parah
         }
 
-        // Pastikan bagian 'users' dan 'bot' ada
-        if (!parsedData.users) {
+        // Pastikan bagian 'users' dan 'bot' ada dan merupakan objek
+        if (typeof parsedData.users !== 'object' || parsedData.users === null) {
+            console.warn("[readDatabase] 'users' field missing or invalid. Initializing 'users'.");
             parsedData.users = {};
         }
-        if (!parsedData.bot) {
+        if (typeof parsedData.bot !== 'object' || parsedData.bot === null) {
+            console.warn("[readDatabase] 'bot' field missing or invalid. Initializing 'bot' stats.");
             parsedData.bot = getDefaultBotStats();
+        } else {
+            // Pastikan semua field di bot stats ada
+            parsedData.bot = { ...getDefaultBotStats(), ...parsedData.bot };
         }
-        console.log("[readDatabase] Database read successfully.");
+
+        // console.log("[readDatabase] Database read successfully."); // Kurangi log verbose
         return parsedData;
 
     } catch (error) {
-        // If the file doesn't exist, create it with the default structure
-        if (error.code === 'ENOENT') {
-            console.log("[readDatabase] Database file not found. Creating a new one.");
+        if (error.code === 'ENOENT') { // File tidak ditemukan
+            console.log("[readDatabase] Database file not found. Creating a new one with default structure.");
             const defaultDatabase = getDefaultDatabaseStructure();
             await writeDatabase(defaultDatabase);
             return defaultDatabase;
-        } else {
-            console.error("[readDatabase] Error reading/parsing database:", error);
-            console.error("[readDatabase] Returning a new database object to prevent further errors.");
-            return getDefaultDatabaseStructure(); // Pastikan selalu mengembalikan objek yang valid
+        } else if (error instanceof SyntaxError) { // Error parsing JSON
+            console.error("[readDatabase] Error parsing database.json (SyntaxError). File might be corrupted.", error.message);
+            console.log("[readDatabase] Attempting to backup corrupted database and create a new one.");
+            try {
+                const backupPath = path.join(__dirname, '..', `database_corrupted_${Date.now()}.json`);
+                await fs.copyFile(dataPath, backupPath);
+                console.log(`[readDatabase] Corrupted database backed up to ${backupPath}`);
+            } catch (backupError) {
+                console.error(`[readDatabase] Failed to backup corrupted database:`, backupError);
+            }
+            const defaultDb = getDefaultDatabaseStructure();
+            await writeDatabase(defaultDb); // Timpa dengan yang baru
+            return defaultDb;
+        } else { // Error lain
+            console.error("[readDatabase] Error reading database:", error);
+            console.warn("[readDatabase] Returning a new default database object to prevent further errors.");
+            return getDefaultDatabaseStructure();
         }
     }
 }
@@ -48,34 +90,36 @@ async function readDatabase() {
 async function writeDatabase(db) {
     try {
         if (typeof db !== 'object' || db === null) {
+            console.error("[writeDatabase] Invalid database object provided. Cannot write to file.");
             throw new Error("Invalid database object. Cannot write to file.");
         }
+        // Tambahkan timestamp kapan terakhir diupdate
+        if (db.bot) {
+            db.bot.lastWrite = new Date().toISOString();
+        }
         await fs.writeFile(dataPath, JSON.stringify(db, null, 2), 'utf8');
-        console.log("[writeDatabase] Database written successfully.");
+        // console.log("[writeDatabase] Database written successfully."); // Kurangi log verbose
     } catch (error) {
         console.error("[writeDatabase] Error writing database:", error);
+        // Pertimbangkan mekanisme retry atau notifikasi admin jika penulisan gagal kritis
     }
 }
 
-// Struktur database default
-function getDefaultDatabaseStructure() {
-    return {
-        users: {},
-        bot: getDefaultBotStats(),
-    };
+// Fungsi untuk menghasilkan ID acak (bisa dipindahkan ke file utils terpisah jika banyak fungsi utilitas)
+function generateRandomId(length = 8) {
+    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += characters.charAt(Math.floor(Math.random() * characters.length));
+    }
+    return result;
 }
 
-// Struktur statistik bot default
-function getDefaultBotStats() {
-    return {
-        totalUsers: 0,
-        totalCommandsUsed: 0,
-    };
-}
 
 module.exports = {
     readDatabase,
     writeDatabase,
-    getDefaultDatabaseStructure, // Export this function as well
-    getDefaultBotStats, // Export this function as well
+    getDefaultDatabaseStructure,
+    getDefaultBotStats,
+    generateRandomId, // Ekspor fungsi ini
 };

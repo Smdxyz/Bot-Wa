@@ -1,117 +1,109 @@
-// commands/saveTube.js
+// commands/ytmp3.js
 const axios = require('axios');
-const crypto = require('crypto');
+const config = require('../config');
+const { getMasterApiKey } = require('../utils/apiKeyManager');
+const { sendAnimatedMessage } = require('../utils/animator'); // Impor animator
 
-const BASE_URL = "https://media.savetube.me/api";
-const ENDPOINTS = {
-  cdn: "/random-cdn",
-  info: "/v2/info",
-  download: "/download"
+module.exports = {
+    Callname: 'ytmp3',
+    Kategori: 'Downloader',
+    SubKategori: 'YouTube',
+    Deskripsi: 'Download audio dari YouTube dalam format MP3.',
+    Usage: 'ytmp3 <url_youtube>',
+    ReqEnergy: 3,
+
+    async execute(sock, msg, options) {
+        const { args, jid } = options;
+        const prefix = config.botPrefix;
+
+        if (args.length === 0) {
+            return sock.sendMessage(jid, { text: `Penggunaan: ${prefix}${this.Callname} <url_youtube>` }, { quoted: msg });
+        }
+
+        const url = args[0];
+        if (!url.includes('youtube.com/') && !url.includes('youtu.be/')) {
+            return sock.sendMessage(jid, { text: '⚠️ URL YouTube tidak valid.' }, { quoted: msg });
+        }
+
+        const apiKey = await getMasterApiKey();
+        if (!apiKey) {
+            return sock.sendMessage(jid, { text: `Fitur ini memerlukan konfigurasi API Key oleh admin.` }, { quoted: msg });
+        }
+
+        const waitFrames = [
+            "🎧 Mencari lagu YouTube Anda...",
+            "🔄 Mengkonversi ke format MP3...",
+            "🎶 Menyiapkan file audio...",
+            "✅ Hampir selesai, audio segera dikirim!"
+        ];
+        let processingMsg = await sendAnimatedMessage(sock, jid, waitFrames, { text: waitFrames[0] }, msg);
+        if (!processingMsg) {
+             processingMsg = await sock.sendMessage(jid, { text: config.waitMessage || "⏳ Memproses..." }, { quoted: msg });
+        }
+
+        try {
+            const apiUrl = `https://szyrineapi.biz.id/download/ytmp3-v4?url=${encodeURIComponent(url)}&format=mp3`;
+            const response = await axios.get(apiUrl, {
+                headers: { 'X-API-Key': apiKey },
+                timeout: 60000 * 2 // Timeout 2 menit, konversi bisa lama
+            });
+
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key });
+            }
+
+            const data = response.data;
+
+            if (!data || !data.status || !data.result) {
+                const errMsg = data && data.message ? data.message : "Gagal mengambil data dari API YouTube MP3.";
+                return sock.sendMessage(jid, { text: `🚫 Error: ${errMsg}` }, { quoted: msg });
+            }
+
+            const result = data.result;
+
+            if (result.type !== 'audio' || result.format !== 'mp3' || !result.download) {
+                return sock.sendMessage(jid, { text: "🚫 Gagal mendapatkan link download MP3 dari API." }, { quoted: msg });
+            }
+
+            let caption = `🎧 *${result.title || 'Audio YouTube'}*\n\n`;
+            caption += `Format: MP3\n`;
+            caption += `Kualitas: ${result.quality || 'Standar'} kbps\n`;
+            caption += `Durasi: ${result.duration ? formatDuration(result.duration) : 'Tidak diketahui'}\n\n`;
+            caption += `Mengirim audio, mohon tunggu...\n${config.watermark || ''}`;
+
+            await sock.sendMessage(jid, { text: caption }, { quoted: msg });
+
+            await sock.sendMessage(jid, {
+                audio: { url: result.download },
+                mimetype: 'audio/mpeg',
+                fileName: `${(result.title || 'youtube_audio').replace(/[<>:"/\\|?*]+/g, '')}.mp3`, // Sanitasi nama file
+                ptt: false
+            }, { quoted: msg, mediaUploadTimeoutMs: 60000 * 5 });
+
+        } catch (error) {
+            if (processingMsg && processingMsg.key) {
+                await sock.sendMessage(jid, { delete: processingMsg.key }).catch(delErr => console.warn("Gagal hapus pesan progres ytmp3:", delErr));
+            }
+            console.error(`[${this.Callname}] Error:`, error.message);
+            let userErrorMessage = `Waduh, ada error pas jalanin command ${this.Callname}.`;
+            if (error.response && error.response.data && (error.response.data.message || error.response.data.error)) {
+                userErrorMessage = `Error dari API: ${error.response.data.message || error.response.data.error}`;
+            } else if (error.code === 'ECONNABORTED') {
+                userErrorMessage = `Server API kelamaan jawab nih atau ukuran file terlalu besar, coba lagi nanti.`;
+            }
+            await sock.sendMessage(jid, { text: userErrorMessage }, { quoted: msg });
+        }
+    }
 };
 
-const savetube = {
-  NamaFitur: 'YouTube Downloader',
-  Callname: 'savetube',
-  Kategori: 'Downloader',
-  SubKategori: 'YouTube',
-  ReqEnergy: 1,
-  ReqTier: null,
-  ReqCoin: 'n',
-  CostCoin: 0,
-  Deskripsi: 'Download audio/video dari YouTube dengan kualitas pilihan.',
-
-  headers: {
-    'accept': '*/*',
-    'content-type': 'application/json',
-    'origin': 'https://yt.savetube.me',
-    'referer': 'https://yt.savetube.me/',
-    'user-agent': 'Postify/1.0.0'
-  },
-  formats: ['144', '240', '360', '480', '720', '1080', 'mp3'],
-
-  crypto: {
-    hexToBuffer: (hexString) => {
-      const matches = hexString.match(/.{1,2}/g);
-      return Buffer.from(matches.join(''), 'hex');
-    },
-
-    decrypt: async (enc) => {
-      try {
-        const secretKey = 'C5D58EF67A7584E4A29F6C35BBC4EB12';
-        const data = Buffer.from(enc, 'base64');
-        const iv = data.slice(0, 16);
-        const content = data.slice(16);
-        const key = savetube.crypto.hexToBuffer(secretKey);
-        
-        const decipher = crypto.createDecipheriv('aes-128-cbc', key, iv);
-        let decrypted = decipher.update(content);
-        decrypted = Buffer.concat([decrypted, decipher.final()]);
-        
-        return JSON.parse(decrypted.toString());
-      } catch (error) {
-        throw new Error(`${error.message}`);
-      }
-    }
-  },
-
-  request: async (endpoint, data = {}, method = 'post') => {
-    try {
-      const { data: response } = await axios({
-        method,
-        url: `${endpoint.startsWith('http') ? '' : BASE_URL}${endpoint}`,
-        data: method === 'post' ? data : undefined,
-        params: method === 'get' ? data : undefined,
-        headers: savetube.headers
-      });
-      return {
-        status: true,
-        code: 200,
-        data: response
-      };
-    } catch (error) {
-      return {
-        status: false,
-        code: error.response?.status || 500,
-        error: error.message
-      };
-    }
-  },
-
-  getCDN: async () => {
-    const response = await savetube.request(ENDPOINTS.cdn, {}, 'get');
-    if (!response.status) return response;
-    return {
-      status: true,
-      code: 200,
-      data: response.data.cdn
-    };
-  },
-
-  download: async (link, format) => {
-    return { status: false, error: 'Function not implemented yet' };
-  },
-
-  execute: async function (sock, msg, commands, { isActive, tier, multiplier, mediaType }) {
-    const jid = msg.key.remoteJid;
-    const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || "";
-    const args = text.split(' ');
-    const link = args[1];
-    const format = args[2];
-
-    if (!link || !format) {
-      return await sock.sendMessage(jid, { text: 'Format salah! Gunakan: .savetube <link> <format>' });
-    }
-
-    try {
-      const result = await savetube.download(link, format);
-      if (!result.status) {
-        return await sock.sendMessage(jid, { text: `❌ Error: ${result.error}` });
-      }
-      await sock.sendMessage(jid, { text: `✅ Download Ready: ${result.result.download}` });
-    } catch (error) {
-      await sock.sendMessage(jid, { text: '❌ Error: ' + error.message });
-    }
-  }
-};
-
-module.exports = savetube;
+function formatDuration(seconds) {
+    if (isNaN(seconds) || seconds < 0) return 'Tidak diketahui';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return [
+        h > 0 ? h : null,
+        m > 0 ? (h > 0 && m < 10 ? '0' + m : m) : (h > 0 ? '00' : '0'),
+        (s < 10 ? '0' : '') + s
+    ].filter(val => val !== null).join(':');
+}

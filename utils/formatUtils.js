@@ -1,129 +1,121 @@
+// utils/formatUtils.js
 const moment = require('moment-timezone');
 const os = require('os');
-const process = require('process');
-const fs = require('fs');
-const path = require('path');
-const config = require('../config'); // Ambil prefix dari config.js
+const config = require('../config'); // Sesuaikan path jika utils.js tidak di root
+const premiumManager = require('../premiumManager'); // Sesuaikan path
 
-/**
- * Format durasi waktu.
- */
-function formatTime(seconds) {
-    const days = Math.floor(seconds / (3600 * 24));
-    seconds %= (3600 * 24);
-    const hours = Math.floor(seconds / 3600);
-    seconds %= 3600;
-    const minutes = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
+function formatTime(seconds) {if (isNaN(seconds) || seconds < 0) return "Durasi gak valid";seconds = Math.floor(seconds);const d = Math.floor(seconds / (3600 * 24));const h = Math.floor(seconds % (3600 * 24) / 3600);const m = Math.floor(seconds % 3600 / 60);const s = Math.floor(seconds % 60);let r = "";if (d > 0) r += `${d} hari, `;if (h > 0) r += `${h} jam, `;if (m > 0) r += `${m} menit, `;if (s > 0 || r === "") r += `${s} detik`;return r.replace(/, $/, "") || "0 detik";}
+function getRandomCoolEmoji() {const emojis = ["🚀","🌟","✨","💥","🔥","⚡","💎","💡","🏆","🥇","👑","🎩","🕶️","🌠","🌌","🤖","🦾","👾","🎮","🎯","🔮","🪄","🎉","🎊","🎈","🎁","📈","💡","💻","🌐","📡","🛰️"];return emojis[Math.floor(Math.random() * emojis.length)];}
+function createCoolProgressBar(current, required, barLength = 12, filledChar = '█', midChar = '▓', emptyChar = '░') {if (required <= 0) return `[${emptyChar.repeat(barLength)}] (N/A)`;const percentage = Math.max(0, Math.min(1, current / required));const filledCount = Math.round(percentage * barLength);let bar = '';for (let i = 0; i < barLength; i++) {if (i < filledCount) bar += filledChar;else if (i === filledCount && percentage > 0 && percentage < 1) bar += midChar;else bar += emptyChar;}return `[${bar}]`;}
+const animatedChars = {borders: [["╔","═","╗","║","╚","╝"],["╭","─","╮","│","╰","╯"],["┌","─","┐","│","└","┘"],["╒","═","╕","│","╘","╛"],["╓","─","╖","║","╙","╜"],],spinners: ["⚡✨","✨⚡","🚀🌌","🌌🚀","💡💡","💡 "," 💡","◇◆","◆◇","▷▶","▶▷","⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"],lineStyles: ["─","━","┄","┅","┈","┉","═"],dividers: ["◈◆◈◆◈◆◈◆◈◆◈","◇◇◇◇◇◇◇◇◇◇◇","☆☆☆☆☆☆☆☆☆☆☆","●-●-●-●-●-●-●","═════════════"]};
+let currentSpinnerIndex = 0;function getSpinnerChar(braille = false) {const setIndex = braille ? animatedChars.spinners.length - 1 : Math.floor(Math.random() * (animatedChars.spinners.length - 1));const spinnerSet = animatedChars.spinners[setIndex];currentSpinnerIndex = (currentSpinnerIndex + 1) % spinnerSet.length;return spinnerSet[currentSpinnerIndex];}
 
-    let timeString = "";
-    if (days > 0) timeString += `${days} hari, `;
-    if (hours > 0) timeString += `${hours} jam, `;
-    if (minutes > 0) timeString += `${minutes} menit, `;
-    timeString += `${secs} detik`;
-    return timeString;
-}
+async function formatSuperMenuTextFrames(botName, user, commandsMap, options = {}) {
+    const prefix = config.botPrefix;
+    const watermark = config.watermark || `© ${botName}`;
+    const ownerNumbers = config.adminNumber.split(',');
+    const ownerToMention = ownerNumbers.length > 0 ? ownerNumbers[0].trim() : null;
 
-/**
- * Emoji acak untuk menu.
- */
-function getRandomEmoji() {
-    const emojis = ["✨", "💎", "🔮", "🪄", "🌟", "🗝️", "🔑", "⚜️"];
-    return emojis[Math.floor(Math.random() * emojis.length)];
-}
-
-/**
- * Progress bar untuk EXP.
- */
-function createProgressBar(currentExp, requiredExp, barLength = 15) {
-    const filledBars = Math.floor((currentExp / requiredExp) * barLength);
-    const emptyBars = barLength - filledBars;
-    return `[${'▓'.repeat(filledBars)}${'░'.repeat(emptyBars)}]`;
-}
-
-/**
- * Format menu bot dengan tampilan profesional dan prefix otomatis.
- */
-async function formatMenu(botName, botStats, popularCommands, watermark, user) {
-    const prefix = config.botPrefix; // Prefix dari config.js
-    const osInfo = {
-        platform: os.platform(),
-        arch: os.arch(),
-        totalMemory: os.totalmem() / (1024 * 1024),
-        freeMemory: os.freemem() / (1024 * 1024),
-        cpuModel: os.cpus()[0].model
-    };
-
-    const username = user.username || "Pengguna";
+    const username = user.username || "User Kece";
     const coin = user.coin || 0;
     const energy = user.energy || 0;
+    const maxEnergy = user.maxEnergy || config.defaultMaxEnergy || 100;
     const exp = user.exp || 0;
     const level = user.level || 1;
-    const requiredExp = 100;
-    const progressBar = createProgressBar(exp, requiredExp);
+    const requiredExp = level * 100;
+    const premiumInfo = premiumManager.getActivePremium(user);
+    const tierDisplayName = config.premiumTiers[premiumInfo.tier]?.displayName || premiumInfo.tier;
 
-    let menu = `╔════════════════════════════════════╗\n` +
-               `       🚀 *${botName} siap melayani!* 🚀\n` +
-               `╚════════════════════════════════════╝\n\n` +
+    const frames = [];
+    const totalFrames = options.totalFrames || config.menuAnimationFrames || 3;
 
-               `👤 *Informasi Pengguna:* \n` +
-               `   • 👤 Nama   : ${username}\n` +
-               `   • 🪙 Koin   : ${coin}\n` +
-               `   • ⚡ Energi : ${energy}\n` +
-               `   • 🎯 Level  : ${level} ${progressBar} (${exp}/${requiredExp} EXP)\n\n` +
+    const frameElements = [
+        { border: animatedChars.borders[0], line: animatedChars.lineStyles[0], spinner: animatedChars.spinners[0], divider: animatedChars.dividers[0], emojiSet: ["🚀", "🌟", "✨"] },
+        { border: animatedChars.borders[1], line: animatedChars.lineStyles[1], spinner: animatedChars.spinners[1], divider: animatedChars.dividers[1], emojiSet: ["💥", "🔥", "⚡"] },
+        { border: animatedChars.borders[2], line: animatedChars.lineStyles[2], spinner: animatedChars.spinners[2], divider: animatedChars.dividers[2], emojiSet: ["💎", "💡", "🏆"] },
+        { border: animatedChars.borders[3], line: animatedChars.lineStyles[3], spinner: animatedChars.spinners[3], divider: animatedChars.dividers[3], emojiSet: ["🥇", "👑", "🎩"] },
+    ];
 
-               `⚙️ *Info VPS:* \n` +
-               `   • 💻 Platform : ${osInfo.platform}\n` +
-               `   • 🖥️ CPU      : ${osInfo.cpuModel}\n` +
-               `   • 💾 Memori   : ${osInfo.freeMemory.toFixed(2)}MB / ${osInfo.totalMemory.toFixed(2)}MB\n\n` +
+    for (let f = 0; f < totalFrames; f++) {
+        let menu = "";
+        const currentFrameStyle = frameElements[f % frameElements.length];
+        const [tl, tc, tr, v, bl, br] = currentFrameStyle.border;
+        const line = currentFrameStyle.line.repeat(28);
+        const coolDivider = currentFrameStyle.divider.substring(0,15);
+        const frameSpinner = currentFrameStyle.spinner[f % currentFrameStyle.spinner.length];
+        const frameEmoji = (index) => currentFrameStyle.emojiSet[index % currentFrameStyle.emojiSet.length];
 
-               `═════════════ ⬇️ *DAFTAR MENU* ⬇️ ═════════════\n`;
+        menu += `${tl}═〘 ${frameEmoji(0)} *${botName}* ${frameEmoji(1)} 〙═${tr}\n`;
+        menu += `${v} Hi *${username}*! ${frameSpinner}\n`;
+        menu += `${v} ${(config.greetingMessages && config.greetingMessages.length > 0) ? config.greetingMessages[f % config.greetingMessages.length] : 'Menu buat lo nih!'}\n`;
+        menu += `${v} ${line}\n`;
 
-    const commandsPath = path.join(__dirname, '..', 'commands');
-    let categorizedCommands = {};
+        const progressBar = createCoolProgressBar(exp, requiredExp, 16, currentFrameStyle.line, animatedChars.spinners[2][f % animatedChars.spinners[2].length], animatedChars.borders[1][1]);
+        menu += `${v} ${tl}─「 ${frameEmoji(2)} *PROFIL KAMU* 」─${tr}\n`;
+        menu += `${v} ${v}   👑 Pangkat  : *${tierDisplayName}*\n`;
+        menu += `${v} ${v}   🪙 Duit     : ${coin}\n`;
+        menu += `${v} ${v}   ⚡ Tenaga   : ${energy}/${maxEnergy}\n`;
+        menu += `${v} ${v}   🌟 Level    : ${level} (${exp}/${requiredExp} EXP)\n`;
+        menu += `${v} ${v}     ${progressBar}\n`;
+        menu += `${v} ${bl}──────────────────────${br}\n`;
+        menu += `${v} ${line}\n`;
 
-    try {
-        const commandFiles = fs.readdirSync(commandsPath);
-        for (const file of commandFiles) {
-            if (file.endsWith('.js')) {
-                const command = require(path.join(commandsPath, file));
-                const { Kategori = "Lainnya", SubKategori = "Umum", Callname, Deskripsi } = command;
+        menu += `${v} ${tl}─「 ${frameEmoji(0)} *INFO BOT & SERVER* 」─${tr}\n`;
+        menu += `${v} ${v}   🤖 Bot Name : ${botName}\n`;
+        if (ownerToMention) menu += `${v} ${v}   🧢 Big Boss : @${ownerToMention}\n`;
+        menu += `${v} ${v}   🕒 Aktif    : ${formatTime(process.uptime())}\n`;
+        menu += `${v} ${v}   📅 Server   : ${moment().tz('Asia/Jakarta').format('DD MMM YY, HH:mm')} WIB\n`;
+        const totalMemGB = (os.totalmem() / (1024 * 1024 * 1024)).toFixed(1);
+        const freeMemGB = (os.freemem() / (1024 * 1024 * 1024)).toFixed(1);
+        menu += `${v} ${v}   💻 OS       : ${os.platform()} (${os.arch()})\n`;
+        menu += `${v} ${v}   💾 RAM      : ${freeMemGB}GB / ${totalMemGB}GB Free\n`;
+        menu += `${v} ${bl}──────────────────────${br}\n`;
+        menu += `${v} ${coolDivider}\n\n`;
 
-                if (!categorizedCommands[Kategori]) categorizedCommands[Kategori] = {};
-                if (!categorizedCommands[Kategori][SubKategori]) categorizedCommands[Kategori][SubKategori] = [];
-
-                categorizedCommands[Kategori][SubKategori].push({
-                    name: Callname || "Tidak ada nama",
-                    description: Deskripsi || "Tidak ada deskripsi"
-                });
+        menu += `╭───「 ${frameEmoji(1)} *MENU PERINTAH* ${frameEmoji(2)} 」───╮\n`;
+        const categorizedCommands = {};
+        commandsMap.forEach(cmd => {
+            const isAdminBot = options.isAdminBot || false;
+            if (cmd.OwnerOnly && (!ownerNumbers.includes(user.jid.split('@')[0]))) return;
+            if (cmd.AdminOnly && !isAdminBot) return;
+            if (cmd.Kategori === "Hidden" || cmd.Kategori === "Testing") return;
+            const category = cmd.Kategori || "Lain-Lain";
+            if (!categorizedCommands[category]) categorizedCommands[category] = [];
+            categorizedCommands[category].push({ name: cmd.Callname });
+        });
+        const sortedCategories = Object.keys(categorizedCommands).sort();
+        if (sortedCategories.length === 0) {
+            menu += `${v}   Yah, belum ada command yang bisa ditampilin nih.\n`;
+        } else {
+            for (const category of sortedCategories) {
+                menu += `${v} ┌─「 *${category.toUpperCase()}* 」\n`;
+                if (categorizedCommands[category].length === 0) {
+                     menu += `${v} │  └─ (Kosong)\n`;
+                } else {
+                    categorizedCommands[category].forEach((cmd, index, arr) => {
+                        const branch = index === arr.length - 1 ? '└─►' : '├─►';
+                        menu += `${v} │  ${branch} ${prefix}${cmd.name} ${frameEmoji(index)}\n`;
+                    });
+                }
             }
         }
-    } catch (error) {
-        console.error('Error reading commands directory:', error);
-    }
+        menu += `${bl}═${"─".repeat(30)}═${br}\n\n`;
 
-    // Struktur menu dengan tampilan profesional
-    for (const category in categorizedCommands) {
-        menu += `\n📁 *${category.toUpperCase()}* \n`;
-        for (const subCategory in categorizedCommands[category]) {
-            menu += `   📂 *${subCategory}* \n`;
-            categorizedCommands[category][subCategory].forEach((cmd, index, arr) => {
-                const isLast = index === arr.length - 1;
-                const branchIcon = isLast ? '└─' : '├─';
-                const emoji = getRandomEmoji();
-                menu += `     ${branchIcon} ${prefix}${cmd.name} ${emoji} (${cmd.description})\n`;
-            });
+        menu += `${getSpinnerChar(true)} Ketik *${prefix}help [command]* buat info lebih.\n`;
+        if (config.newsletterJidForMenu && config.newsletterNameForMenu) {
+            menu += `${getSpinnerChar(true)} 📢 Info & Update? Cek *${config.newsletterNameForMenu}*!\n`;
+        } else if (config.linkChannel) {
+            menu += `${getSpinnerChar(true)} 📢 Channel: ${config.linkChannel}\n`;
         }
+        menu += `${getSpinnerChar(true)} ${watermark}`;
+        frames.push(menu);
     }
-
-    menu += `\n═══════════════════════════════════════════\n`;
-    menu += `            ${watermark} | 🌐 *Szyrine Bots Api*`;
-
-    return menu;
+    return frames;
 }
 
 module.exports = {
     formatTime,
-    formatMenu,
-    createProgressBar
+    getRandomCoolEmoji,
+    createCoolProgressBar,
+    formatSuperMenuTextFrames
 };

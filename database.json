@@ -1,0 +1,95 @@
+{
+  "users": {
+    "6281933038407@s.whatsapp.net": {
+      "jid": "6281933038407@s.whatsapp.net",
+      "username": "Sann",
+      "coin": 84,
+      "energy": 98,
+      "maxEnergy": 300,
+      "level": 1,
+      "exp": 23.5,
+      "premiumTier": "Sultan",
+      "premiumEndTime": "2025-07-31T02:59:00.120Z",
+      "commandsUsed": {
+        "menu": 23,
+        "adminpanel": 3
+      },
+      "score": 0,
+      "lastMessageTime": "2025-05-25T02:59:07.822Z",
+      "firstSeen": "2025-05-24T13:14:42.259Z",
+      "messagesSent": 34,
+      "achievements": [
+        "FIRST_MESSAGE",
+        "FIRST_COMMAND",
+        "MENU_EXPLORER_PRO"
+      ],
+      "lastCoinRegenTime": "2025-05-25T02:58:59.676Z",
+      "lastEnergyRegenTime": "2025-05-25T02:58:59.756Z",
+      "isBanned": false,
+      "banReason": null,
+      "bannedAt": null,
+      "lastModified": "2025-05-25T02:59:09.744Z",
+      "commandsUsedCountInNightTime": 13
+    },
+    "6287756807000@s.whatsapp.net": {
+      "jid": "6287756807000@s.whatsapp.net",
+      "username": "emsu1984",
+      "coin": 1,
+      "energy": 100,
+      "maxEnergy": 100,
+      "level": 1,
+      "exp": 0.25,
+      "premiumTier": "Super Kere",
+      "premiumEndTime": null,
+      "commandsUsed": {},
+      "score": 0,
+      "lastMessageTime": "2025-05-24T16:02:50.032Z",
+      "firstSeen": "2025-05-24T16:02:47.776Z",
+      "messagesSent": 2,
+      "achievements": [],
+      "lastCoinRegenTime": "2025-05-24T16:02:49.369Z",
+      "lastEnergyRegenTime": "2025-05-24T16:02:49.401Z",
+      "isBanned": false,
+      "banReason": null,
+      "bannedAt": null,
+      "commandsUsedCountInNightTime": 0,
+      "lastModified": "2025-05-24T16:02:50.037Z"
+    },
+    "6283125905220@s.whatsapp.net": {
+      "jid": "6283125905220@s.whatsapp.net",
+      "username": "Sann A.k.a Susanto",
+      "coin": 21,
+      "energy": 98,
+      "maxEnergy": 100,
+      "level": 1,
+      "exp": 10.75,
+      "premiumTier": "Super Kere",
+      "premiumEndTime": null,
+      "commandsUsed": {
+        "menu": 1,
+        "ytmp3": 1,
+        "pinc": 1
+      },
+      "score": 0,
+      "lastMessageTime": "2025-05-25T06:56:32.713Z",
+      "firstSeen": "2025-05-25T06:48:34.434Z",
+      "messagesSent": 3,
+      "achievements": [
+        "FIRST_COMMAND"
+      ],
+      "lastCoinRegenTime": "2025-05-25T06:48:35.593Z",
+      "lastEnergyRegenTime": "2025-05-25T06:56:32.668Z",
+      "isBanned": false,
+      "banReason": null,
+      "bannedAt": null,
+      "commandsUsedCountInNightTime": 0,
+      "lastModified": "2025-05-25T06:56:51.773Z"
+    }
+  },
+  "bot": {
+    "totalUsers": 3,
+    "totalCommandsUsed": 29,
+    "startTime": "2025-05-24T13:14:42.202Z",
+    "lastWrite": "2025-05-25T06:56:51.773Z"
+  }
+}
