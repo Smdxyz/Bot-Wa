@@ -1,8 +1,8 @@
 // index.js
+// Bagian import modern (seperti yang Anda minta)
 const os = require('os');
 const process = require('process');
 const fs = require('node:fs/promises');
-// const path = require('node:path'); // Tidak digunakan secara langsung, bisa dihapus
 const {
     default: makeWASocket,
     DisconnectReason,
@@ -11,368 +11,274 @@ const {
     makeCacheableSignalKeyStore,
     delay,
     Browsers,
-    DEFAULT_CONNECTION_CONFIG
+    DEFAULT_CONNECTION_CONFIG // Dipertahankan untuk kelengkapan
 } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
+const { Boom } = require('@hapi/boom'); // Dipertahankan untuk error handling yang lebih baik
 const pino = require('pino');
-// const qrcodeTerminal = require('qrcode-terminal'); // <<== DIHAPUS
-const readline = require('readline');
+const readline = require('readline'); // Import readline seperti di kode lama
 
+// --- KONFIGURASI & VARIABEL GLOBAL DARI KODE LAMA ANDA ---
+const AUTH_FOLDER = 'auth_info_baileys'; // Sesuaikan jika nama folder di kode lama berbeda
+global.WA_VERSION = null;
+global.BAILEY_VERSION = null;
+
+// readline dibuat di scope atas seperti di kode lama Anda
+let rl = null; // Menggunakan 'rl' atau nama variabel yang Anda gunakan di kode lama
+
+// Fungsi helper untuk menutup readline (jika ada di kode lama, atau ini praktik yang baik)
+const closeRl = () => {
+    if (rl) {
+        rl.close();
+        rl = null;
+    }
+};
+// --- AKHIR BAGIAN GLOBAL KODE LAMA ---
+
+// Ini dari struktur baru Anda, akan dipertahankan di luar logika auth
 const config = require('./config');
 const { handleMessageUpsert } = require('./handlers/messageHandler');
 const loadCommands = require('./utils/loadCommands');
 const watchCommands = require('./utils/watchCommands');
-
-const AUTH_FOLDER_PATH = 'auth_info_baileys';
-global.WA_VERSION = null;
-global.BAILEY_VERSION = null;
-
-// State untuk mengelola proses autentikasi interaktif
-let authProcessState = {
-    expectingQR: false,
-    pairingCodeRequested: false,
-    pairingCodeDisplayed: false,
-    readlineInstance: null
-};
-
-// Fungsi untuk menutup readline dengan aman dan mereset state terkait
-const closeAuthReadline = () => {
-    if (authProcessState.readlineInstance) {
-        authProcessState.readlineInstance.close();
-        authProcessState.readlineInstance = null;
-    }
-};
-
-const resetAuthProcessFlags = () => {
-    authProcessState.expectingQR = false;
-    authProcessState.pairingCodeRequested = false;
-    authProcessState.pairingCodeDisplayed = false;
-};
-
-// Fungsi untuk meminta pairing code melalui input terminal
-async function requestPairingCodeViaTerminalInput(sockInstance, rlInstance) {
-    try {
-        const phoneNumber = await new Promise((resolve) => {
-            rlInstance.question('Masukkan nomor HP Anda untuk Pairing Code (contoh: 6281234567890): ', resolve);
-        });
-
-        if (!phoneNumber || !phoneNumber.trim()) {
-            console.log('Nomor HP tidak dimasukkan. Proses pairing code manual dibatalkan.');
-            return false;
-        }
-
-        if (sockInstance && (sockInstance.ws.isOpen || sockInstance.ws.isConnecting) && !sockInstance.authState.creds.me) {
-            console.log(`Meminta pairing code untuk nomor: ${phoneNumber}...`);
-            authProcessState.pairingCodeRequested = true; // Tandai pairing code diminta
-            await sockInstance.requestPairingCode(phoneNumber); // Akan memicu 'creds.update'
-            return true;
-        } else if (sockInstance.authState.creds.me) {
-             console.log('Sesi sudah ada. Tidak meminta pairing code baru.');
-             return false;
-        } else {
-            console.warn('Socket tidak tersedia atau tidak terbuka untuk requestPairingCode.');
-            return false;
-        }
-    } catch (error) {
-        console.error('Gagal mendapatkan pairing code manual:', error.message);
-        // authProcessState.pairingCodeRequested = false; // Dikelola oleh pemanggil jika perlu reset
-        return false;
-    }
-}
+// const { createUser, getUser, updateUser, getAllUsers, addExp } = require('./userDatabase'); // Jika ada di kode lama
+// const { useCommand } = require('./commandManager'); // Jika ada di kode lama
+// const { getActivePremium } = require('./premiumManager'); // Jika ada di kode lama
+// const captionMessageHandler = require('./handlers/captionMessageHandler'); // Jika ada di kode lama
+// const { readDatabase, writeDatabase } = require('./utils/utils'); // Jika ada di kode lama
 
 
 async function startBot() {
-    // Pastikan folder auth ada
+    // Pastikan folder auth ada (logika dari kode lama mungkin tidak seketat ini, tapi ini aman)
     try {
-        await fs.mkdir(AUTH_FOLDER_PATH, { recursive: true });
+        await fs.mkdir(AUTH_FOLDER, { recursive: true });
     } catch (e) {
-        console.error(`Tidak dapat membuat direktori ${AUTH_FOLDER_PATH}:`, e);
+        // Kode lama mungkin tidak punya ini, tapi ini mencegah error jika folder tidak bisa dibuat
+        console.error(`Tidak dapat membuat direktori ${AUTH_FOLDER}:`, e);
         process.exit(1);
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER_PATH);
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
+    const { version, isLatest } = await fetchLatestBaileysVersion(); // 'version' seperti di kode lama
+    console.log(`Versi WA yang dipake: v${version.join('.')}, udah paling baru nih: ${isLatest}`); // Log dari kode lama
+    // const baileysVersion = version; // Ini ada di kode lama Anda, tapi 'version' sudah cukup
 
-    const { version: waVersion, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`Menggunakan versi WA: v${waVersion.join('.')}, Versi terbaru: ${isLatest}`);
-    global.WA_VERSION = waVersion.join('.');
+    global.WA_VERSION = version.join('.');
     global.BAILEY_VERSION = require('@whiskeysockets/baileys/package.json').version;
 
-    let sessionExists = !!(state.creds && state.creds.me && state.creds.me.id && state.creds.registered === true);
-
-    // Tentukan apakah Baileys harus mencoba mencetak QR ke terminal.
-    // Ini akan true jika:
-    // 1. Tidak ada sesi yang tersimpan (`!sessionExists`)
-    // 2. DAN kita TIDAK dalam mode autoAuth dengan nomor telepon yang sudah dikonfigurasi
-    //    (karena dalam kasus itu, kita akan memprioritaskan pairing code otomatis dan tidak ingin QR muncul tiba-tiba).
-    const shouldPrintQRInTerminalByBaileys = !sessionExists && !(config.autoAuth && config.botPhoneNumber);
-
-    if (sessionExists) {
-        console.log("Sesi autentikasi valid ditemukan. Mencoba menghubungkan...");
-    } else {
-        if (config.autoAuth && config.botPhoneNumber) {
-            console.log("Belum ada sesi valid. Mode Auto-Auth (Pairing Code) akan dicoba secara otomatis.");
-        } else {
-            console.log("Belum ada sesi valid. Diperlukan autentikasi manual.");
-            if (shouldPrintQRInTerminalByBaileys) {
-                console.log("INFO: Jika memilih opsi QR, Baileys akan mencoba menampilkannya di terminal jika diperlukan server.");
-            } else {
-                console.log("INFO: printQRInTerminal Baileys dinonaktifkan karena konfigurasi autoAuth dengan nomor atau sesi sudah ada.");
-            }
-        }
-    }
+    console.log(`Versi WhatsApp: ${global.WA_VERSION}`); // Log dari kode lama
+    console.log(`Versi Baileys: ${global.BAILEY_VERSION}`); // Log dari kode lama
 
     const sock = makeWASocket({
-        ...DEFAULT_CONNECTION_CONFIG,
-        version: waVersion,
-        logger: pino({ level: config.logLevel || 'silent' }),
-        printQRInTerminal: shouldPrintQRInTerminalByBaileys, // <<== DIUBAH
+        ...DEFAULT_CONNECTION_CONFIG, // Dipertahankan
+        version, // 'version' dari kode lama
+        logger: pino({ level: 'silent' }), // 'silent' seperti di kode lama
+        printQRInTerminal: true, // INTI DARI KODE LAMA
         auth: {
             creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
         },
-        browser: Browsers.appropriate(config.botName || 'MyWhatsAppBot'),
-        msgRetryCounterCache: new Map(),
-        generateHighQualityLinkPreview: true,
-        shouldIgnoreJid: jid => jid && jid.endsWith('@newsletter'),
-        shouldSyncHistory: false,
-        linkPreviewImageThumbnailWidth: 192,
+        // msgRetryCounterCache: new Map(), // Ini dari Baileys baru, kode lama mungkin tidak ada
+        // generateHighQualityLinkPreview: true, // Ini dari Baileys baru
+        // browser: Browsers.appropriate(config.botName || 'MyWhatsAppBot'), // Ini dari Baileys baru
     });
 
-    // Helper untuk mendapatkan username
-    sock.getWaUsername = async (msg, jid) => {
+    // Fungsi buat ngambil username (ANDA MINTA INI BOLEH DARI KODE BARU JIKA BEDA)
+    // Jika Anda ingin persis seperti kode lama, ganti ini dengan implementasi getWaUsername dari kode lama Anda.
+    // Saya akan gunakan versi yang lebih robust dari diskusi kita sebelumnya, yang mirip dengan kode baru.
+    const getWaUsername = async (msg, jid) => {
         try {
             let waUsername = sock.pushName || (msg && msg.pushName) || '';
             if (!waUsername || waUsername.trim() === "") {
-                const contact = sock.contacts && sock.contacts[jid];
-                waUsername = contact?.notify || contact?.name || jid.split('@')[0];
+                const contact = sock.contacts && sock.contacts[jid]; // Baileys baru mungkin punya ini
+                if (contact) {
+                     waUsername = contact.notify || contact.name || jid.split('@')[0];
+                } else {
+                    waUsername = jid.split('@')[0]; // Fallback jika tidak ada info kontak
+                }
             }
             return waUsername || jid.split('@')[0];
         } catch (error) {
-            console.error("Gagal mendapatkan username WA:", error);
-            return jid.split('@')[0];
+            console.error("Gagal dapet username:", error); // Log dari kode lama
+            return jid.split('@')[0]; // Fallback
         }
     };
+    sock.getWaUsername = getWaUsername; // Tempelkan ke instance sock
+
+    // const updateExistingUsernames = async () => { ... }; // Jika ada di kode lama, masukkan di sini
 
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr: newQr } = update;
+        const { connection, lastDisconnect, qr } = update; // 'qr' dari kode lama
 
         if (connection === 'open') {
-            console.log('Koneksi berhasil terbuka! Bot siap digunakan.');
+            console.log('Wih, udah konek nih!'); // Log dari kode lama
+            await delay(2000); // Delay dari kode lama
+
             const botJid = sock.authState.creds.me.id;
-            const botUsername = await sock.getWaUsername(null, botJid);
-            console.log(`Bot terhubung sebagai: ${botUsername} (${botJid})`);
-            
-            closeAuthReadline();
-            resetAuthProcessFlags();
-            sessionExists = true; // Update status sesi global
+            // const msg = { pushName: sock.pushName }; // Ini ada di kode lama Anda
+            const botUsername = await sock.getWaUsername(null, botJid); // Menggunakan getWaUsername yang sudah ada
+
+            if (botUsername && botUsername !== botJid.split('@')[0]) { // Sedikit penyesuaian untuk cek username valid
+                console.log(`Username bot udah dapet: ${botUsername}`); // Log dari kode lama
+            } else {
+                console.warn("Waduh, username bot gagal dimuat."); // Log dari kode lama
+            }
+            // await updateExistingUsernames(); // Jika ada di kode lama
+            closeRl(); // Tutup readline jika terbuka
         }
 
-        // Logika untuk newQr tanpa qrcode-terminal
-        if (newQr) {
-            if (authProcessState.expectingQR && !sessionExists && !authProcessState.pairingCodeRequested) {
-                // Jika printQRInTerminal di makeWASocket adalah true, Baileys yang akan menampilkannya.
-                // Kita tidak perlu melakukan apa-apa di sini selain memberi info.
-                console.log('INFO: Server mengirim QR code.');
-                if (!shouldPrintQRInTerminalByBaileys) { // Jika Baileys tidak dikonfigurasi untuk print QR
-                     console.log('      Namun, printQRInTerminal Baileys tidak aktif saat startup. QR mungkin tidak muncul di terminal.');
-                     console.log('      Pastikan perangkat sudah terhubung atau gunakan metode pairing code jika tersedia.');
-                } else {
-                     console.log('      Jika printQRInTerminal Baileys aktif, QR seharusnya muncul di terminal.');
-                }
-            } else if (authProcessState.pairingCodeRequested) {
-                // Abaikan QR jika kita sedang menunggu pairing code
-                console.log('INFO: QR diterima dari server, tetapi diabaikan karena sedang dalam proses pairing code.');
-            }
-            // Jika tidak expectingQR dan tidak pairingCodeRequested, QR bisa muncul dari Baileys 
-            // jika printQRInTerminal di makeWASocket adalah true dan server mengirimkannya. Ini adalah perilaku default Baileys.
+        if (qr && !sock.authState.creds.me?.id) { // Cek agar tidak muncul jika sudah login
+            console.log('Scan QR code ini buat login ya!'); // Log dari kode lama
         }
 
         if (connection === 'close') {
-            const oldSessionExistsStatus = sessionExists; // Simpan status sesi sebelum direset
-            sessionExists = false; // Tandai sesi tidak ada lagi saat koneksi ditutup
-            closeAuthReadline(); 
-            
-            const statusCode = lastDisconnect?.error instanceof Boom ? lastDisconnect.error.output.statusCode : lastDisconnect?.error?.output?.statusCode || 500;
-            const reason = DisconnectReason[statusCode] || `Tidak diketahui (${statusCode})`;
-            console.log(`Koneksi terputus. Alasan: ${reason}, Kode: ${statusCode}`);
+            closeRl(); // Tutup readline jika terbuka
+            const statusCode = lastDisconnect?.error?.output?.statusCode; // Ambil status code seperti di kode lama
+            const reason = DisconnectReason[statusCode] || "Gak tau kenapa"; // Log dari kode lama
+            console.log(`Koneksi putus nih. Alesannya: ${reason}, Kodenya: ${statusCode}`); // Log dari kode lama
 
-            resetAuthProcessFlags(); 
-
-            const criticalErrorCodes = [
-                DisconnectReason.loggedOut,
-                DisconnectReason.badSession,
-                DisconnectReason.multideviceMismatch,
-                DisconnectReason.connectionReplaced
-            ];
-
-            if (criticalErrorCodes.includes(statusCode)) {
-                console.log(`Alasan diskonek (${reason}) memerlukan sesi baru. Menghapus folder auth...`);
-                try {
-                    await fs.rm(AUTH_FOLDER_PATH, { recursive: true, force: true });
-                    console.log(`Folder ${AUTH_FOLDER_PATH} berhasil dihapus.`);
-                } catch (e) {
-                    console.error(`Gagal menghapus folder ${AUTH_FOLDER_PATH}. Hapus manual dan restart.`, e);
-                    process.exit(1);
-                }
-                console.log("Merestart bot untuk sesi baru...");
-                startBot(); 
-            } else if (statusCode === DisconnectReason.restartRequired) {
-                console.log("Restart diperlukan oleh Baileys, merestart bot...");
-                startBot();
-            } else if (oldSessionExistsStatus && (statusCode === DisconnectReason.timedOut || statusCode === DisconnectReason.connectionLost || statusCode === DisconnectReason.connectionClosed)) {
-                console.log("Koneksi terputus saat sesi aktif. Baileys akan mencoba reconnect otomatis.");
-            } else if (!oldSessionExistsStatus && (statusCode === DisconnectReason.timedOut || statusCode === DisconnectReason.connectionLost || statusCode === DisconnectReason.connectionClosed)){
-                console.log("Gagal terhubung (timeout/lost/closed) pada percobaan koneksi awal. Periksa jaringan atau coba lagi.");
-                // Di sini bisa dipertimbangkan untuk memanggil initiateAuthenticationProcess() lagi setelah delay
-                // jika ingin menawarkan opsi auth kembali secara otomatis.
+            if (statusCode !== DisconnectReason.loggedOut) {
+                console.log("Reconnect..."); // Log dari kode lama
+                startBot(); // Panggil fungsi buat nyalain bot lagi (dari kode lama)
             } else {
-                console.log("Koneksi ditutup. Jika masalah persisten, coba restart bot.");
+                console.log(`Udah logout. Hapus folder ${AUTH_FOLDER} terus restart ya!`); // Log dari kode lama
             }
         }
     });
 
-    sock.ev.on('creds.update', async (creds) => {
-        if (creds.pairingCode && creds.registered === false && !authProcessState.pairingCodeDisplayed) {
-            console.log(`\n========================================`);
-            console.log(`   Kode Pairing Anda: ${creds.pairingCode}`);
-            console.log(`========================================`);
-            console.log("Silakan masukkan kode ini di WhatsApp Anda pada perangkat yang ingin dihubungkan.");
-            authProcessState.pairingCodeDisplayed = true;
-            closeAuthReadline(); 
-        }
-        if (creds.registered === true) {
-            // Hanya tampilkan pesan "Autentikasi berhasil" jika ini adalah hasil dari proses auth aktif
-            if(authProcessState.pairingCodeRequested || authProcessState.expectingQR) {
-                 // Dan hanya jika sesi sebelumnya tidak ada (artinya ini benar-benar auth baru)
-                 if(sessionExists === false) { 
-                    console.log("Autentikasi berhasil dan terdaftar!");
-                 }
-            }
-            resetAuthProcessFlags();
-            closeAuthReadline();
-            sessionExists = true; // Pastikan status sesi diperbarui
-        }
-        await saveCreds();
-    });
+    sock.ev.on('creds.update', saveCreds); // Ini standar Baileys, kode lama Anda juga pasti punya ini atau sejenisnya
 
+    // --- BAGIAN COMMANDS DAN MESSAGE HANDLER (DARI STRUKTUR BARU ANDA, SESUAI PERMINTAAN) ---
     let commands = new Map();
     try { commands = await loadCommands(); }
     catch (error) { console.error('Gagal memuat command awal:', error); process.exit(1); }
 
-    const setCommands = (newCommands) => { commands = newCommands; };
-    if (process.env.NODE_ENV === 'development' || config.enableCommandWatcher) {
+    function setCommands(newCommands) { commands = newCommands; } // Dari kode lama Anda
+
+    // const watcher = await watchCommands(commands, setCommands); // Ini dari kode baru, jika kode lama tidak ada, hapus
+    // Jika kode lama Anda punya cara lain untuk watch, gunakan itu. Jika tidak, bisa pakai ini atau hapus.
+    if (process.env.NODE_ENV === 'development' || config.enableCommandWatcher) { // Ini dari kode baru
         watchCommands(commands, setCommands).then(() => console.log("Command watcher aktif.")).catch(e => console.error("Gagal memulai command watcher:", e));
     } else {
         console.log("Command watcher tidak aktif.");
     }
 
+
     sock.ev.on('messages.upsert', async (m) => {
-        await handleMessageUpsert(sock, commands, m);
+        await handleMessageUpsert(sock, commands, m); // Panggil fungsi yang udah diimport (dari kode baru)
     });
+    // --- AKHIR BAGIAN COMMANDS ---
 
-    // Beri Baileys sedikit waktu untuk mencoba koneksi awal dengan sesi yang ada
-    await delay(process.env.NODE_ENV === 'test' ? 500 : 3000);
 
-    if (!sock.authState.creds.me?.id) { // Jika belum terautentikasi penuh
-        console.log("Belum terautentikasi sepenuhnya. Memulai proses autentikasi...");
-        await initiateAuthenticationProcess(sock, state, shouldPrintQRInTerminalByBaileys);
-    } else {
-        console.log("Bot sudah terautentikasi atau sedang mencoba konek dengan sesi yang ada.");
-        closeAuthReadline(); 
-        resetAuthProcessFlags();
-    }
-}
+    // --- LOGIKA AUTENTIKASI INTI DARI KODE LAMA ANDA ---
+    const authDir = `./${AUTH_FOLDER}`; // Variabel dari kode lama
+    // Tunggu bentar biar koneksi stabil (dari kode lama)
+    await delay(15000); // Atau lebih, sesuaikan sama koneksi lo (dari kode lama)
 
-async function initiateAuthenticationProcess(sock, state, willBaileysPrintQR) {
-    // Cek apakah sudah ada pairing code dari sesi sebelumnya yang belum terpakai
-    if (state.creds.pairingCode && state.creds.registered === false && !authProcessState.pairingCodeDisplayed) {
-        console.log("INFO: Menampilkan pairing code yang sudah ada dari sesi sebelumnya.");
-        console.log(`\n========================================`);
-        console.log(`   Kode Pairing Tersimpan: ${state.creds.pairingCode}`);
-        console.log(`========================================`);
-        console.log("Gunakan kode pairing di atas. Jika tidak valid, hapus folder 'auth_info_baileys' dan restart.");
-        authProcessState.pairingCodeDisplayed = true;
-        authProcessState.pairingCodeRequested = true;
-        return;
-    }
-
-    // Jika auto-auth dikonfigurasi dan ada nomor telepon
-    if (config.autoAuth && config.botPhoneNumber) {
-        console.log(`Mode Auto-Auth: Mencoba meminta pairing code untuk ${config.botPhoneNumber}...`);
-        try {
-            authProcessState.pairingCodeRequested = true;
-            await sock.requestPairingCode(config.botPhoneNumber);
-            // 'creds.update' akan menampilkan kode pairing
-        } catch (e) {
-            console.error("Gagal meminta pairing code otomatis:", e.message);
-            console.log("Auto-auth gagal. Jika bot tidak terhubung, Anda mungkin perlu autentikasi manual atau periksa konfigurasi.");
-            authProcessState.pairingCodeRequested = false;
-             // Pertimbangkan fallback ke manual di sini jika diinginkan
+    // Cek koneksi udah oke apa belom (dari kode lama)
+    // Di Baileys v6+, sock.ws.socket tidak langsung tersedia.
+    // Kode lama Anda mungkin menggunakan cara lain atau versi Baileys yang berbeda.
+    // Untuk sekarang, kita akan skip pengecekan readyState ini jika menyebabkan error,
+    // dan langsung ke pengecekan folder auth.
+    /*
+    if (sock.ws.socket.readyState !== 1) { // INI MUNGKIN ERROR DI BAILEYS MODERN
+        console.log("Koneksi belom siap. Nunggu dulu..."); // Log dari kode lama
+        await delay(5000); // Tunggu lagi (dari kode lama)
+        if (sock.ws.socket.readyState !== 1) { // INI MUNGKIN ERROR
+            console.error("Koneksi gagal mulu nih. Cek internet lo ya!"); // Log dari kode lama
+            return; // Berhenti aja deh (dari kode lama)
         }
-        return; 
+    }
+    */
+
+    let filesInAuthDir = [];
+    try {
+        filesInAuthDir = await fs.readdir(authDir);
+    } catch (e) {
+        if (e.code !== 'ENOENT') { // Jika error bukan karena folder tidak ada
+            console.error('Error pas ngecek folder auth:', e); // Log dari kode lama
+        }
+        // Jika ENOENT, filesInAuthDir akan tetap kosong, logika di bawah akan jalan
     }
 
-    // Jika tidak ada TTY (misalnya berjalan di server tanpa input interaktif) dan butuh auth manual
-    if (!process.stdin.isTTY) {
-        console.error("Autentikasi manual diperlukan tetapi tidak ada terminal interaktif (TTY) yang tersedia.");
-        console.error("Silakan konfigurasikan auto-auth dengan nomor telepon atau jalankan di lingkungan dengan TTY.");
-        if (willBaileysPrintQR) {
-            console.error("Jika QR Code diperlukan, Baileys mungkin telah mencoba mencetaknya. Periksa log.");
-        }
-        process.exit(1);
-    }
+    // Cek folder kosong ATAU creds.me belom ada (LOGIKA KUNCI DARI KODE LAMA)
+    if (filesInAuthDir.length === 0 || !sock.authState.creds.me?.id) {
+        console.log('Data auth gak ketemu atau creds belom lengkap. Minta pairing code nih...'); // Log dari kode lama
 
-    // Jika sampai sini, berarti perlu autentikasi manual dan ada TTY
-    if (authProcessState.readlineInstance) closeAuthReadline();
-    authProcessState.readlineInstance = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const askQuestion = (query) => new Promise(resolve => authProcessState.readlineInstance.question(query, resolve));
+        // Fungsi buat minta nomer HP (dari kode lama)
+        const askForPhoneNumber = () => {
+            return new Promise((resolve) => {
+                // Inisialisasi readline jika belum, seperti di kode lama Anda
+                if (!rl) {
+                    rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+                }
+                rl.question('Masukin nomer HP lo (contoh: 6281234567890): ', (phoneNumber) => { // Log dari kode lama
+                    resolve(phoneNumber.trim()); // Ditambah trim untuk kebersihan
+                });
+            });
+        };
 
-    console.log("\nPilih metode autentikasi:");
-    console.log("1. Pairing Code (Disarankan)");
-    console.log("2. QR Code (Jika diaktifkan di Baileys, akan muncul di terminal jika server mengirimkannya)");
-    const choice = await askQuestion("Pilihan Anda (1 atau 2): ");
+        const phoneNumber = await askForPhoneNumber();
+        if (phoneNumber) {
+            console.log(`Nomer HP yang dimasukin: ${phoneNumber}`); // Log dari kode lama
 
-    if (choice === '1') {
-        authProcessState.expectingQR = false; // Tidak mengharapkan QR
-        authProcessState.pairingCodeRequested = true; // Tandai sebelum memanggil
-        const success = await requestPairingCodeViaTerminalInput(sock, authProcessState.readlineInstance);
-        if (!success && authProcessState.pairingCodeRequested && !authProcessState.pairingCodeDisplayed) {
-            console.log("Permintaan pairing code manual tidak berhasil atau dibatalkan.");
-            authProcessState.pairingCodeRequested = false; // Reset jika benar-benar gagal tanpa kode ditampilkan
-        }
-        // Readline akan ditutup oleh event lain atau jika error di dalam fungsi
-    } else if (choice === '2') {
-        authProcessState.pairingCodeRequested = false; // Tidak sedang dalam proses pairing
-        authProcessState.expectingQR = true;         // Sekarang kita mengharapkan QR
-        console.log("Menunggu server mengirim QR code...");
-        if (willBaileysPrintQR) {
-            console.log("Jika 'printQRInTerminal' Baileys aktif, QR akan muncul di terminal ini jika diterima.");
+            // Fungsi pairingCode (DARI KODE LAMA ANDA, DITULIS ULANG SEAKURAT MUNGKIN)
+            const pairingCode = async (jid) => {
+                // Di kode lama Anda: if (!sock.authState.creds.me)
+                // Di Baileys modern, lebih aman cek !sock.authState.creds.me?.id
+                if (!sock.authState.creds.me?.id) {
+                    try {
+                        // INI ADALAH ASUMSI UTAMA DARI KODE LAMA ANDA:
+                        // BAHWA `requestPairingCode` LANGSUNG MENGEMBALIKAN KODE.
+                        // INI TIDAK AKAN BEKERJA DENGAN BAILEYS MODERN STANDAR.
+                        console.log(`Meminta pairing code untuk ${jid}... (logika kode lama)`);
+                        const code = await sock.requestPairingCode(jid); // ASUMSI KODE LAMA
+                        
+                        // JIKA `code` DI ATAS `undefined` (KARENA BAILEYS MODERN), PESAN INI AKAN ANEH.
+                        console.log(` kode pairingnya: ${code}`); // LOG DARI KODE LAMA ANDA
+                        
+                        // Jika kode lama Anda tidak punya ini, hapus.
+                        // Ini hanya tambahan untuk kejelasan jika kode benar-benar muncul.
+                        if (code) {
+                             console.log("   Silakan masukkan kode ini di WhatsApp Anda.");
+                        } else {
+                             console.log("   Tidak ada kode pairing yang diterima langsung (mungkin perlu cek 'creds.update' jika menggunakan Baileys modern).");
+                        }
+                        closeRl(); // Tutup readline setelah selesai
+                    } catch (error) {
+                        console.error('Gagal dapet pairing code:', error.message); // Log dari kode lama
+                        closeRl(); // Tutup readline jika error
+                    }
+                } else {
+                    console.log('Udah ke-auth nih. Skip pairing code ya!'); // Log dari kode lama
+                    closeRl();
+                }
+            };
+            await pairingCode(phoneNumber);
         } else {
-            console.log("Opsi 'printQRInTerminal' Baileys tidak aktif saat startup. QR mungkin tidak akan muncul di terminal ini.");
-            console.log("Jika Anda memerlukan QR, pastikan tidak ada sesi aktif atau coba hubungkan perangkat dari WhatsApp di ponsel Anda.");
+            console.log('Nomer HP gak dimasukin. Gak bisa ke-auth deh.'); // Log dari kode lama
+            closeRl();
         }
-        // Jika 'printQRInTerminal' di makeWASocket adalah true, Baileys seharusnya sudah menangani pencetakan QR.
-        // Tidak ada tindakan lebih lanjut di sini selain menunggu event 'qr'.
     } else {
-        console.log("Pilihan tidak valid. Silakan restart bot.");
-        closeAuthReadline();
-        process.exit(1);
+        console.log("Data auth udah ada. Skip pairing code!"); // Log dari kode lama
+        closeRl(); // Pastikan readline ditutup jika tidak dipakai
     }
+    // --- AKHIR LOGIKA AUTENTIKASI KODE LAMA ---
 }
 
 startBot().catch(err => {
-    console.error("Gagal memulai bot secara keseluruhan:", err);
-    closeAuthReadline(); 
-    resetAuthProcessFlags();
-    process.exit(1);
+    console.error("Gagal memulai bot secara keseluruhan:", err); // Log dari kode lama (mungkin sedikit beda)
+    closeRl(); // Pastikan readline ditutup
+    process.exit(1); // Kode lama mungkin tidak exit, tapi ini lebih aman
 });
 
-// Handle sinyal keluar untuk membersihkan readline
+// Penanganan sinyal keluar (dari struktur baru Anda, ini bagus)
 ['SIGINT', 'SIGTERM', 'SIGQUIT'].forEach(signal => process.on(signal, () => {
     console.log(`\n${signal} diterima. Menutup bot...`);
-    closeAuthReadline();
-    if (typeof sock !== 'undefined' && sock && typeof sock.end === 'function') {
-        // sock.end(new Error(`Proses dihentikan dengan sinyal ${signal}`));
-    }
+    closeRl();
     process.exit(0);
 }));
+
+// Komentar dari kode lama Anda:
+// Perhatiin bagian readline.close() di atas, gue kasih komen tambahan.
+// Soal readline, ada baiknya instance `readline` dibuat hanya saat mau `askForPhoneNumber` dan di-close setelahnya.
+// Tapi untuk perubahan minimal, gue comment aja dulu.
+// --> Saya sudah mencoba mengikuti ini dengan membuat `rl` saat dibutuhkan dan menutupnya via `closeRl()`.
